@@ -25,6 +25,11 @@ pub struct LogQuery {
     pub limit: Option<usize>,
     /// Only commits touching these paths.
     pub paths: Vec<BString>,
+    /// Read commit bodies. The graph leaves them out (`parse::log::GRAPH_FORMAT`).
+    pub bodies: bool,
+    /// Stash commits to walk as extra tips. With [`Self::all`], `refs/stash` itself is left out
+    /// so only these appear (see `graph::History::with_pseudo`).
+    pub stashes: Vec<String>,
 }
 
 impl Default for LogQuery {
@@ -36,15 +41,18 @@ impl Default for LogQuery {
             skip: 0,
             limit: None,
             paths: Vec::new(),
+            bodies: true,
+            stashes: Vec::new(),
         }
     }
 }
 
 impl LogQuery {
-    /// Every ref, topological order: what the commit graph shows.
+    /// Every ref, topological order, subjects only: what the commit graph shows.
     pub fn graph() -> Self {
         Self {
             all: true,
+            bodies: false,
             ..Self::default()
         }
     }

@@ -1,0 +1,249 @@
+[
+  {
+    "method": "GET",
+    "url": "https://api.github.com/user",
+    "headers": {
+      "etag": "W/\"user-1\"",
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": "4999",
+      "x-ratelimit-reset": "4102444800"
+    },
+    "body": {
+      "login": "InfernoDragon0",
+      "id": 1,
+      "avatar_url": "https://avatars.githubusercontent.com/u/1?v=4",
+      "html_url": "https://github.com/InfernoDragon0",
+      "name": "Inferno Dragon",
+      "type": "User"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/user/repos?sort=updated&per_page=50&page=1&affiliation=owner%2Ccollaborator%2Corganization_member",
+    "headers": {
+      "link": "<https://api.github.com/user/repos?page=2>; rel=\"next\", <https://api.github.com/user/repos?page=2>; rel=\"last\""
+    },
+    "body": [
+      {
+        "id": 10,
+        "name": "GitDragon",
+        "full_name": "InfernoDragon0/GitDragon",
+        "owner": { "login": "InfernoDragon0", "id": 1 },
+        "private": true,
+        "fork": false,
+        "description": "A git client",
+        "html_url": "https://github.com/InfernoDragon0/GitDragon",
+        "clone_url": "https://github.com/InfernoDragon0/GitDragon.git",
+        "ssh_url": "git@github.com:InfernoDragon0/GitDragon.git",
+        "default_branch": "main",
+        "updated_at": "2026-10-09T10:00:00Z"
+      },
+      {
+        "id": 11,
+        "name": "zed",
+        "full_name": "InfernoDragon0/zed",
+        "owner": { "login": "InfernoDragon0", "id": 1 },
+        "private": false,
+        "fork": true,
+        "description": null,
+        "html_url": "https://github.com/InfernoDragon0/zed",
+        "default_branch": "main",
+        "updated_at": "2026-10-01T08:30:00Z"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/pulls?state=open&sort=updated&direction=desc&per_page=30&page=1",
+    "headers": { "etag": "\"pulls-1\"" },
+    "body": [
+      {
+        "number": 42,
+        "title": "Add GitHost trait",
+        "body": "Closes #7",
+        "state": "open",
+        "draft": true,
+        "merged_at": null,
+        "user": { "login": "octocat", "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4", "html_url": "https://github.com/octocat" },
+        "head": { "ref": "feature/hosts", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "repo": { "full_name": "octocat/GitDragon" } },
+        "base": { "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+        "labels": [ { "name": "enhancement", "color": "a2eeef" } ],
+        "html_url": "https://github.com/InfernoDragon0/GitDragon/pull/42",
+        "created_at": "2026-10-08T09:00:00Z",
+        "updated_at": "2026-10-09T09:00:00Z"
+      },
+      {
+        "number": 41,
+        "title": "Graph speedups",
+        "body": null,
+        "state": "open",
+        "draft": false,
+        "merged_at": null,
+        "user": { "login": "InfernoDragon0" },
+        "head": { "ref": "graph", "sha": "cccccccccccccccccccccccccccccccccccccccc", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+        "base": { "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+        "labels": [],
+        "html_url": "https://github.com/InfernoDragon0/GitDragon/pull/41",
+        "created_at": "2026-10-07T09:00:00Z",
+        "updated_at": "2026-10-08T09:00:00Z"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/pulls/40",
+    "body": {
+      "number": 40,
+      "title": "LFS support",
+      "body": "",
+      "state": "closed",
+      "draft": false,
+      "merged_at": "2026-10-06T12:00:00Z",
+      "user": { "login": "InfernoDragon0" },
+      "head": { "ref": "lfs", "sha": "dddddddddddddddddddddddddddddddddddddddd", "repo": null },
+      "base": { "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+      "labels": [],
+      "html_url": "https://github.com/InfernoDragon0/GitDragon/pull/40",
+      "created_at": "2026-10-05T09:00:00Z",
+      "updated_at": "2026-10-06T12:00:00Z"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/pulls",
+    "status": 201,
+    "body": {
+      "number": 43,
+      "title": "New thing",
+      "body": "Body",
+      "state": "open",
+      "draft": false,
+      "user": { "login": "InfernoDragon0" },
+      "head": { "ref": "new-thing", "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+      "base": { "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb", "repo": { "full_name": "InfernoDragon0/GitDragon" } },
+      "html_url": "https://github.com/InfernoDragon0/GitDragon/pull/43",
+      "created_at": "2026-10-09T11:00:00Z",
+      "updated_at": "2026-10-09T11:00:00Z"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/issues?state=open&sort=updated&direction=desc&per_page=30&page=1",
+    "body": [
+      {
+        "number": 7,
+        "title": "Hosts panel",
+        "body": "We need PRs",
+        "state": "open",
+        "user": { "login": "octocat" },
+        "assignees": [ { "login": "InfernoDragon0" } ],
+        "labels": [ { "name": "ui", "color": "" } ],
+        "comments": 3,
+        "html_url": "https://github.com/InfernoDragon0/GitDragon/issues/7",
+        "created_at": "2026-10-01T09:00:00Z",
+        "updated_at": "2026-10-09T08:00:00Z"
+      },
+      {
+        "number": 42,
+        "title": "Add GitHost trait",
+        "state": "open",
+        "user": { "login": "octocat" },
+        "comments": 0,
+        "html_url": "https://github.com/InfernoDragon0/GitDragon/pull/42",
+        "created_at": "2026-10-08T09:00:00Z",
+        "updated_at": "2026-10-09T09:00:00Z",
+        "pull_request": { "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/pulls/42" }
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/issues",
+    "status": 201,
+    "body": {
+      "number": 8,
+      "title": "Crash on open",
+      "body": "Steps…",
+      "state": "open",
+      "user": { "login": "InfernoDragon0" },
+      "labels": [ { "name": "bug", "color": "d73a4a" } ],
+      "comments": 0,
+      "html_url": "https://github.com/InfernoDragon0/GitDragon/issues/8",
+      "created_at": "2026-10-09T11:00:00Z",
+      "updated_at": "2026-10-09T11:00:00Z"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/issues/7/comments",
+    "status": 201,
+    "body": {
+      "id": 9001,
+      "user": { "login": "InfernoDragon0" },
+      "body": "On it",
+      "html_url": "https://github.com/InfernoDragon0/GitDragon/issues/7#issuecomment-9001",
+      "created_at": "2026-10-09T11:05:00Z"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/main/check-runs?per_page=100",
+    "body": {
+      "total_count": 2,
+      "check_runs": [
+        { "name": "build", "status": "completed", "conclusion": "success", "html_url": "https://github.com/InfernoDragon0/GitDragon/runs/1", "output": { "title": "Build passed" } },
+        { "name": "test (windows)", "status": "in_progress", "conclusion": null, "details_url": "https://github.com/InfernoDragon0/GitDragon/runs/2" }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/main/status?per_page=100",
+    "body": {
+      "state": "success",
+      "statuses": [
+        { "context": "ci/legacy", "state": "success", "description": "ok", "target_url": "https://ci.example.com/1" }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/broken/check-runs?per_page=100",
+    "status": 403,
+    "body": { "message": "Resource not accessible by personal access token" }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/broken/status?per_page=100",
+    "body": {
+      "state": "failure",
+      "statuses": [
+        { "context": "ci/legacy", "state": "failure", "description": "2 tests failed", "target_url": "https://ci.example.com/2" },
+        { "context": "lint", "state": "success" }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/aaaa1111",
+    "headers": {
+      "x-ratelimit-limit": "5000",
+      "x-ratelimit-remaining": "4000",
+      "x-ratelimit-reset": "4102444800"
+    },
+    "body": {
+      "sha": "aaaa1111",
+      "author": { "login": "octocat", "id": 583231, "avatar_url": "https://avatars.githubusercontent.com/u/583231?v=4" },
+      "commit": { "message": "x" }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://api.github.com/repos/InfernoDragon0/GitDragon/commits/bbbb2222",
+    "body": {
+      "sha": "bbbb2222",
+      "author": null,
+      "commit": { "message": "email matches no account" }
+    }
+  }
+]

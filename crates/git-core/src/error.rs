@@ -42,7 +42,7 @@ pub enum GitError {
     Timeout { command: String, after: Duration },
 
     /// A user-supplied ref / path / URL that could be read as an option or is malformed.
-    #[error("invalid {what}: {value:?}")]
+    #[error("invalid {what}: {:?}", crate::redact::redact(value))]
     InvalidArgument { what: &'static str, value: String },
 
     #[error(transparent)]
@@ -108,7 +108,8 @@ impl FailureKind {
 pub(crate) fn stderr_tail(stderr: &[u8], max_lines: usize) -> String {
     let text = String::from_utf8_lossy(stderr);
     let lines: Vec<&str> = text.lines().filter(|l| !l.trim().is_empty()).collect();
-    lines[lines.len().saturating_sub(max_lines)..].join("\n")
+    let tail = lines[lines.len().saturating_sub(max_lines)..].join("\n");
+    crate::redact::redact(&tail).into_owned()
 }
 
 #[cfg(test)]

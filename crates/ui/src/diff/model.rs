@@ -58,6 +58,9 @@ pub struct DiffModel {
     pub split: Vec<DiffRow>,
     pub added: usize,
     pub removed: usize,
+    /// The file is stored in Git LFS: the text diff is of its pointer, so views show this
+    /// size change instead.
+    pub lfs: Option<git_core::lfs::PointerChange>,
 }
 
 impl DiffModel {
@@ -142,6 +145,7 @@ impl DiffModel {
                 }
             }
         }
+        let lfs = git_core::lfs::pointer_change(&file);
         Self {
             file,
             lines,
@@ -149,6 +153,7 @@ impl DiffModel {
             split,
             added,
             removed,
+            lfs,
         }
     }
 

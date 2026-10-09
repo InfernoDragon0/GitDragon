@@ -2,15 +2,22 @@
 //! (design: "Git backend: CLI first").
 
 pub mod cli;
+pub mod conflicts;
 pub mod detect;
 pub mod error;
+pub mod graph;
+pub mod history_ops;
+pub mod lfs;
+pub mod maintenance;
 pub mod ops;
 pub mod parse;
 pub mod patch;
 pub mod progress;
+pub mod redact;
 pub mod repo;
 pub mod runner;
 pub mod setup;
+pub mod sync_ops;
 pub mod watch;
 
 /// Read-only gix fast path (design: optional, behind the GitRepo trait). Not implemented yet.
@@ -20,8 +27,11 @@ pub mod gix_repo {}
 pub use cli::{CliRepo, LogStream};
 pub use detect::{GitBinary, GitVersion};
 pub use error::{FailureKind, GitError, Result};
+pub use history_ops::{ChangedFile, ResetMode};
+pub use maintenance::CommitGraph;
 pub use ops::{ApplyTarget, CommitRequest, StashAction};
 pub use patch::{Direction, Pick};
 pub use progress::Progress;
 pub use repo::{DiffTarget, GitRepo, LogQuery};
 pub use runner::{CommandLog, CommandRecord, GitCommand, GitOutput, GitRunner, GitStream, Mode};
+pub use sync_ops::{PullMode, PushOptions, Submodule, SubmoduleState};

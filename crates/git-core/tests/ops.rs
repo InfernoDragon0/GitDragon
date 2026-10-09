@@ -239,3 +239,151 @@ fn stash_push_pop_drop() {
     block(repo.stash_action(StashAction::Pop, 0)).unwrap();
     assert_eq!(read(d, "f.txt"), "stashed\n");
 }
+
+fn head(d: &Path) -> String {
+    git(d, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+#[test]
+fn graph_actions_branch_tag_switch_and_reset() {
+    use git_core::ResetMode;
+
+    let (dir, repo) = fixture();
+    let d = dir.path();
+    let first = head(d);
+    write(d, "g.txt", "g\n");
+    git(d, &["add", "g.txt"]);
+    git(d, &["commit", "-q", "-m", "second"]);
+    let second = head(d);
+
+    // Branch at the first commit without switching, then switch to it.
+    block(repo.create_branch("topic", &first, false)).unwrap();
+    assert_eq!(git(d, &["rev-parse", "topic"]).trim(), first);
+    assert_eq!(git(d, &["branch", "--show-current"]).trim(), "main");
+    block(repo.switch_branch("topic")).unwrap();
+    assert_eq!(git(d, &["branch", "--show-current"]).trim(), "topic");
+    // Create-and-switch.
+    block(repo.create_branch("other", &second, true)).unwrap();
+    assert_eq!(head(d), second);
+
+    // Lightweight and annotated tags.
+    block(repo.create_tag("v1", &first, None)).unwrap();
+    block(repo.create_tag("v2", &second, Some("Release two"))).unwrap();
+    assert_eq!(git(d, &["cat-file", "-t", "v1"]).trim(), "commit");
+    assert_eq!(git(d, &["cat-file", "-t", "v2"]).trim(), "tag");
+    assert!(git(d, &["tag", "-n1", "v2"]).contains("Release two"));
+
+    // Bad names never reach git as options.
+    assert!(block(repo.create_branch("-x", &first, false)).is_err());
+    assert!(block(repo.create_branch("a..b", &first, false)).is_err());
+    assert!(block(repo.create_tag("bad tag", &first, None)).is_err());
+
+    // Detached checkout, then back.
+    block(repo.checkout_detached(&first)).unwrap();
+    assert_eq!(git(d, &["branch", "--show-current"]).trim(), "");
+    block(repo.switch_branch("other")).unwrap();
+
+    // Hard reset moves the branch and worktree; soft keeps the change staged.
+    block(repo.reset(ResetMode::Soft, &first)).unwrap();
+    assert_eq!(head(d), first);
+    assert!(git(d, &["diff", "--cached", "--name-only"]).contains("g.txt"));
+    block(repo.reset(ResetMode::Hard, &second)).unwrap();
+    assert_eq!(head(d), second);
+    assert_eq!(read(d, "g.txt"), "g\n");
+}
+
+#[test]
+fn graph_actions_cherry_pick_and_revert() {
+    let (dir, repo) = fixture();
+    let d = dir.path();
+    git(d, &["switch", "-q", "-c", "side"]);
+    write(d, "s.txt", "side\n");
+    git(d, &["add", "s.txt"]);
+    git(d, &["commit", "-q", "-m", "side work"]);
+    let side = head(d);
+    git(d, &["switch", "-q", "main"]);
+
+    block(repo.cherry_pick(&side, false)).unwrap();
+    assert_eq!(read(d, "s.txt"), "side\n");
+    assert_eq!(git(d, &["log", "-1", "--format=%s"]).trim(), "side work");
+
+    let picked = head(d);
+    block(repo.revert(&picked, false)).unwrap();
+    assert!(!d.join("s.txt").exists());
+    assert!(git(d, &["log", "-1", "--format=%s"]).starts_with("Revert"));
+
+    // Reverting a merge needs -m 1.
+    git(d, &["switch", "-q", "-c", "feature"]);
+    write(
+        d, "t.txt", "feature
+",
+    );
+    git(d, &["add", "t.txt"]);
+    git(d, &["commit", "-q", "-m", "feature work"]);
+    git(d, &["switch", "-q", "main"]);
+    git(
+        d,
+        &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+    );
+    assert!(d.join("t.txt").exists());
+    let merge = head(d);
+    block(repo.revert(&merge, true)).unwrap();
+    assert!(!d.join("t.txt").exists());
+}
+
+#[test]
+fn commit_graph_is_written_then_kept_up_to_date() {
+    use git_core::CommitGraph;
+    use std::time::{Duration, SystemTime};
+
+    let (dir, repo) = fixture();
+    let d = dir.path();
+    let graph = d.join(".git/objects/info/commit-graphs/commit-graph-chain");
+    assert!(!graph.exists());
+
+    assert_eq!(
+        block(repo.ensure_commit_graph()).unwrap(),
+        CommitGraph::Written
+    );
+    assert!(graph.exists());
+    assert_eq!(
+        block(repo.ensure_commit_graph()).unwrap(),
+        CommitGraph::UpToDate
+    );
+
+    // A new commit in a pack newer than the graph (as after a fetch) adds a layer.
+    write(
+        d, "n.txt", "new
+",
+    );
+    git(d, &["add", "n.txt"]);
+    git(d, &["commit", "-q", "-m", "new"]);
+    git(d, &["repack", "-q", "-d"]);
+    let old = SystemTime::now() - Duration::from_secs(3600);
+    // git writes graph files read-only.
+    let mut perms = std::fs::metadata(&graph).unwrap().permissions();
+    #[allow(clippy::permissions_set_readonly_false)]
+    perms.set_readonly(false);
+    std::fs::set_permissions(&graph, perms).unwrap();
+    std::fs::File::options()
+        .write(true)
+        .open(&graph)
+        .unwrap()
+        .set_modified(old)
+        .unwrap();
+    assert_eq!(
+        block(repo.ensure_commit_graph()).unwrap(),
+        CommitGraph::Updated
+    );
+    assert_eq!(
+        block(repo.ensure_commit_graph()).unwrap(),
+        CommitGraph::UpToDate
+    );
+
+    // core.commitGraph=false is respected.
+    git(d, &["config", "core.commitGraph", "false"]);
+    assert_eq!(
+        block(repo.ensure_commit_graph()).unwrap(),
+        CommitGraph::Disabled
+    );
+}

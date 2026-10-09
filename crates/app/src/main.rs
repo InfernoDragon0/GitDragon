@@ -1,15 +1,23 @@
 //! GitDragon desktop app entry point.
 
+mod accounts;
 mod actions;
+mod avatars;
 mod changes;
 mod clone_dialog;
+mod dialogs;
+mod drag_scroll;
+mod graph;
+mod hosted;
 mod op_strip;
 mod panels;
 mod rail;
 mod repo_tab;
 mod settings;
+mod sidebar;
 mod startup;
 mod state;
+mod toolbar;
 mod welcome;
 mod workspace;
 
@@ -24,11 +32,19 @@ use crate::state::SavedState;
 use crate::workspace::Workspace;
 
 fn main() {
+    // Crash reports are redacted (tokens, URL userinfo), the askpass helper's too.
+    git_core::redact::install_panic_hook();
+    // Run as git's askpass helper: answer and exit before any UI starts.
+    if let Some(code) = accounts::helper_main() {
+        std::process::exit(code);
+    }
     startup::begin();
+    // Every log line goes through redaction too.
     tracing_subscriber::fmt()
         .with_env_filter(
             EnvFilter::try_from_env("GITDRAGON_LOG").unwrap_or_else(|_| EnvFilter::new("info")),
         )
+        .with_writer(|| git_core::redact::RedactingWriter::new(std::io::stdout()))
         .init();
     let _startup = tracing::info_span!("startup").entered();
     startup::mark("tracing");
@@ -50,6 +66,9 @@ fn main() {
         }
         startup::mark("theme");
         actions::bind_keys(cx);
+        accounts::init(cx);
+        avatars::init(saved.gravatar.unwrap_or(false), cx);
+        startup::mark("accounts");
 
         cx.on_action(|_: &Quit, cx| cx.quit());
         cx.on_action(|_: &ToggleDarkMode, cx| {

@@ -1,4 +1,4 @@
-//! Dock panels. Placeholders until their cards land (branches sidebar, graph, details).
+//! The centre dock panel: welcome screen, or the active repository's Graph / Changes / Settings view.
 
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::v_flex;
@@ -10,60 +10,12 @@ use gpui_kit::{
 use ui::Palette;
 
 use crate::changes::ChangesView;
+use crate::graph::GraphView;
+use crate::graph::link::GraphLink;
 use crate::rail::View;
 use crate::repo_tab::RepoTab;
 use crate::settings::SettingsView;
 use crate::welcome::Welcome;
-
-/// A titled panel that says what will live there.
-pub struct Placeholder {
-    name: &'static str,
-    title: SharedString,
-    hint: SharedString,
-    focus: FocusHandle,
-}
-
-impl Placeholder {
-    pub fn new(
-        name: &'static str,
-        title: impl Into<SharedString>,
-        hint: impl Into<SharedString>,
-        cx: &mut Context<Self>,
-    ) -> Self {
-        Self {
-            name,
-            title: title.into(),
-            hint: hint.into(),
-            focus: cx.focus_handle(),
-        }
-    }
-}
-
-impl BasePanel for Placeholder {
-    fn panel_name(&self) -> &'static str {
-        self.name
-    }
-}
-
-impl Panel for Placeholder {
-    fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        self.title.clone()
-    }
-}
-
-impl EventEmitter<PanelEvent> for Placeholder {}
-
-impl Focusable for Placeholder {
-    fn focus_handle(&self, _: &App) -> FocusHandle {
-        self.focus.clone()
-    }
-}
-
-impl Render for Placeholder {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        empty_state(&self.title, &self.hint, &Palette::of(cx)).track_focus(&self.focus)
-    }
-}
 
 /// The centre panel: the welcome screen when no repository tab is active, otherwise whichever
 /// view the activity rail picked for the active repository.
@@ -73,6 +25,10 @@ pub struct CenterView {
     welcome: Entity<Welcome>,
     /// One Changes view per repository tab, so selection and drafts survive tab switches.
     changes: Vec<(WeakEntity<RepoTab>, Entity<ChangesView>)>,
+    /// One Graph view per repository tab, so selection and scroll survive tab switches.
+    graphs: Vec<(WeakEntity<RepoTab>, Entity<GraphView>)>,
+    /// Shared with the details panel: the active tab's selected commit.
+    link: Entity<GraphLink>,
     /// Created on first visit; Settings works with no repository open.
     settings: Option<Entity<SettingsView>>,
     focus: FocusHandle,
@@ -80,12 +36,14 @@ pub struct CenterView {
 }
 
 impl CenterView {
-    pub fn new(welcome: Entity<Welcome>, cx: &mut Context<Self>) -> Self {
+    pub fn new(welcome: Entity<Welcome>, link: Entity<GraphLink>, cx: &mut Context<Self>) -> Self {
         Self {
             view: View::default(),
             repo: None,
             welcome,
             changes: Vec::new(),
+            graphs: Vec::new(),
+            link,
             settings: None,
             focus: cx.focus_handle(),
             _observe_repo: None,
@@ -99,6 +57,20 @@ impl CenterView {
         self.repo = repo;
         // Closed tabs: drop their views (and any running operation).
         self.changes.retain(|(tab, _)| tab.upgrade().is_some());
+        self.graphs.retain(|(tab, _)| tab.upgrade().is_some());
+        // The details panel follows the newly active tab's selection.
+        let weak = self.repo.as_ref().map(Entity::downgrade);
+        let graph = self
+            .graphs
+            .iter()
+            .find(|(tab, _)| Some(tab) == weak.as_ref())
+            .map(|(_, graph)| graph.clone());
+        match graph {
+            Some(graph) => graph.update(cx, |graph, cx| graph.publish_selection(cx)),
+            None => self
+                .link
+                .update(cx, |link, cx| link.set_selection(weak, None, cx)),
+        }
         cx.notify();
     }
 
@@ -123,6 +95,22 @@ impl CenterView {
         }
         let view = cx.new(|cx| ChangesView::new(repo, window, cx));
         self.changes.push((weak, view.clone()));
+        view
+    }
+
+    fn graph_view(
+        &mut self,
+        repo: Entity<RepoTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<GraphView> {
+        let weak = repo.downgrade();
+        if let Some((_, view)) = self.graphs.iter().find(|(tab, _)| *tab == weak) {
+            return view.clone();
+        }
+        let link = self.link.clone();
+        let view = cx.new(|cx| GraphView::new(repo, link, window, cx));
+        self.graphs.push((weak, view.clone()));
         view
     }
 
@@ -182,6 +170,14 @@ impl Render for CenterView {
                 .child(view)
                 .into_any_element();
         }
+        if let (View::Graph, Some(repo)) = (self.view, self.repo.clone()) {
+            let view = self.graph_view(repo, window, cx);
+            return div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(view)
+                .into_any_element();
+        }
         let Some(repo) = &self.repo else {
             return div()
                 .size_full()
@@ -191,7 +187,7 @@ impl Render for CenterView {
         };
         let repo = repo.read(cx);
         let hint = match self.view {
-            View::Graph => "Commit graph and history.",
+            View::Graph => unreachable!("rendered by GraphView"),
             View::Changes => unreachable!("rendered by ChangesView"),
             View::Conflicts => "Merge, rebase and cherry-pick conflicts.",
             View::PullRequests => "Pull requests from your connected hosts.",

@@ -1,6 +1,6 @@
 //! Settings page (AgentSummary shape: page header, one card per section, rows with a label, a
-//! short state line and the control). Appearance only for now; Accounts, Git and Keyboard join
-//! with their cards.
+//! short state line and the control). Appearance and Accounts; Git and Keyboard join with their
+//! cards.
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::slider::{Slider, SliderEvent, SliderState};
@@ -15,6 +15,7 @@ use ui::{Appearance, Mode, Palette, Skin};
 
 pub struct SettingsView {
     zoom_slider: Entity<SliderState>,
+    accounts: Entity<crate::accounts::AccountsCard>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -48,6 +49,7 @@ impl SettingsView {
         ];
         Self {
             zoom_slider,
+            accounts: cx.new(|cx| crate::accounts::AccountsCard::new(window, cx)),
             focus: cx.focus_handle(),
             _subs,
         }
@@ -208,7 +210,38 @@ impl Render for SettingsView {
                                     .child("Changes save as you go."),
                             ),
                     )
-                    .child(appearance_card),
+                    .child(appearance_card)
+                    .child({
+                        let gravatar =
+                            crate::avatars::handle(cx).is_some_and(|a| a.read(cx).gravatar());
+                        v_flex()
+                            .w_full()
+                            .p_4()
+                            .gap_1()
+                            .rounded(px(8.))
+                            .border_1()
+                            .border_color(palette.border)
+                            .bg(palette.panel)
+                            .child(div().pb_2().text_color(palette.emph).child("Avatars"))
+                            .child(row(
+                                "Gravatar",
+                                "Look up author pictures on gravatar.com. Sends a hash of each \
+                                 author's email there. GitHub noreply addresses always show \
+                                 their GitHub picture.",
+                                choice(
+                                    "gravatar",
+                                    &[(false, "Off"), (true, "On")],
+                                    gravatar,
+                                    |on, cx| {
+                                        if let Some(avatars) = crate::avatars::handle(cx) {
+                                            avatars.update(cx, |a, cx| a.set_gravatar(on, cx));
+                                        }
+                                    },
+                                ),
+                                &palette,
+                            ))
+                    })
+                    .child(self.accounts.clone()),
             )
     }
 }

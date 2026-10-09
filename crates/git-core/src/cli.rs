@@ -14,7 +14,7 @@ use crate::runner::{GitCommand, GitRunner, GitStream};
 pub const LOG_BATCH: usize = 500;
 
 /// Git's empty tree, for diffing a root commit.
-const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
+pub(crate) const EMPTY_TREE: &str = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
 
 #[derive(Clone)]
 pub struct CliRepo {
@@ -52,7 +52,12 @@ impl CliRepo {
     }
 
     fn log_command(&self, query: &LogQuery) -> Result<GitCommand> {
-        let mut cmd = self.read().arg("log").args(log::args());
+        let format = if query.bodies {
+            log::FORMAT
+        } else {
+            log::GRAPH_FORMAT
+        };
+        let mut cmd = self.read().arg("log").args(log::args_with(format));
         if query.topo_order {
             cmd = cmd.arg("--topo-order");
         }
@@ -63,10 +68,12 @@ impl CliRepo {
             cmd = cmd.arg(format!("--max-count={limit}"));
         }
         if query.all {
-            cmd = cmd.arg("--all");
+            // The stash ref's tip would show with its index / untracked helper commits;
+            // stashes come in through `query.stashes` instead.
+            cmd = cmd.arg("--exclude=refs/stash").arg("--all");
         }
         cmd = cmd.arg("--end-of-options");
-        for rev in &query.revs {
+        for rev in query.revs.iter().chain(&query.stashes) {
             cmd = cmd.rev(rev)?;
         }
         // Always end with `--` so a rev can never be taken for a path, even with no paths.

@@ -1,0 +1,277 @@
+[
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/user",
+    "headers": { "etag": "W/\"gl-user-1\"", "ratelimit-limit": "2000", "ratelimit-remaining": "1999", "ratelimit-reset": "4102444800" },
+    "body": {
+      "id": 1,
+      "username": "infernodragon0",
+      "name": "Inferno Dragon",
+      "state": "active",
+      "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/1/avatar.png",
+      "web_url": "https://gitlab.com/infernodragon0"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects?membership=true&order_by=last_activity_at&per_page=50&page=1",
+    "headers": { "x-next-page": "2", "x-page": "1", "x-total-pages": "2" },
+    "body": [
+      {
+        "id": 10,
+        "name": "Proj",
+        "path": "proj",
+        "path_with_namespace": "group/sub/proj",
+        "description": "Nested project",
+        "visibility": "private",
+        "default_branch": "main",
+        "http_url_to_repo": "https://gitlab.com/group/sub/proj.git",
+        "ssh_url_to_repo": "git@gitlab.com:group/sub/proj.git",
+        "web_url": "https://gitlab.com/group/sub/proj",
+        "last_activity_at": "2026-10-09T10:00:00.000Z",
+        "namespace": { "id": 5, "full_path": "group/sub", "kind": "group" }
+      },
+      {
+        "id": 11,
+        "name": "Dotfiles",
+        "path": "dotfiles",
+        "path_with_namespace": "infernodragon0/dotfiles",
+        "description": "",
+        "visibility": "public",
+        "forked_from_project": { "id": 99, "path_with_namespace": "someone/dotfiles" },
+        "http_url_to_repo": "https://gitlab.com/infernodragon0/dotfiles.git",
+        "ssh_url_to_repo": "git@gitlab.com:infernodragon0/dotfiles.git",
+        "web_url": "https://gitlab.com/infernodragon0/dotfiles",
+        "last_activity_at": "2026-10-01T08:30:00.000Z",
+        "namespace": { "id": 1, "full_path": "infernodragon0", "kind": "user" }
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects?membership=true&order_by=last_activity_at&per_page=50&page=2",
+    "headers": { "x-next-page": "", "x-page": "2", "x-total-pages": "2" },
+    "body": [
+      {
+        "id": 12,
+        "path": "last",
+        "path_with_namespace": "infernodragon0/last",
+        "visibility": "internal",
+        "web_url": "https://gitlab.com/infernodragon0/last"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/merge_requests?state=opened&order_by=updated_at&sort=desc&per_page=30&page=1",
+    "headers": { "etag": "\"mrs-1\"" },
+    "body": [
+      {
+        "id": 501,
+        "iid": 12,
+        "project_id": 10,
+        "title": "Draft: Add GitLab host",
+        "description": "Closes #7",
+        "state": "opened",
+        "draft": true,
+        "work_in_progress": true,
+        "author": { "id": 2, "username": "tanuki", "name": "Tanuki", "avatar_url": "https://gitlab.com/uploads/-/system/user/avatar/2/avatar.png", "web_url": "https://gitlab.com/tanuki" },
+        "source_branch": "feature/gitlab",
+        "target_branch": "main",
+        "source_project_id": 77,
+        "target_project_id": 10,
+        "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "labels": ["backend", "hosts"],
+        "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/12",
+        "created_at": "2026-10-08T09:00:00.000Z",
+        "updated_at": "2026-10-09T09:30:00.000Z"
+      },
+      {
+        "id": 500,
+        "iid": 11,
+        "project_id": 10,
+        "title": "Fix graph scroll",
+        "description": null,
+        "state": "opened",
+        "draft": false,
+        "author": { "id": 1, "username": "infernodragon0", "name": "Inferno Dragon", "web_url": "https://gitlab.com/infernodragon0" },
+        "source_branch": "fix/scroll",
+        "target_branch": "main",
+        "source_project_id": 10,
+        "target_project_id": 10,
+        "sha": "cccccccccccccccccccccccccccccccccccccccc",
+        "labels": [],
+        "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/11",
+        "created_at": "2026-10-07T09:00:00.000Z",
+        "updated_at": "2026-10-08T09:00:00.000Z"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/merge_requests?state=all&order_by=updated_at&sort=desc&per_page=30&page=1",
+    "body": [
+      {
+        "iid": 10,
+        "title": "Merged work",
+        "state": "merged",
+        "source_branch": "old",
+        "target_branch": "main",
+        "sha": "dddddddddddddddddddddddddddddddddddddddd",
+        "labels": [],
+        "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/10",
+        "created_at": "2026-09-01T09:00:00.000Z",
+        "updated_at": "2026-09-02T09:00:00.000Z"
+      },
+      {
+        "iid": 9,
+        "title": "Dropped",
+        "state": "closed",
+        "work_in_progress": false,
+        "source_branch": "dropped",
+        "target_branch": "main",
+        "labels": [],
+        "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/9",
+        "created_at": "2026-08-01T09:00:00.000Z",
+        "updated_at": "2026-08-02T09:00:00.000Z"
+      }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/merge_requests/10",
+    "body": {
+      "iid": 10,
+      "title": "Merged work",
+      "description": "Done",
+      "state": "merged",
+      "merged_at": "2026-09-02T09:00:00.000Z",
+      "source_branch": "old",
+      "target_branch": "main",
+      "sha": "dddddddddddddddddddddddddddddddddddddddd",
+      "labels": ["done"],
+      "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/10",
+      "created_at": "2026-09-01T09:00:00.000Z",
+      "updated_at": "2026-09-02T09:00:00.000Z"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/merge_requests",
+    "status": 201,
+    "body": {
+      "iid": 13,
+      "title": "Draft: New thing",
+      "description": "Body",
+      "state": "opened",
+      "draft": true,
+      "author": { "username": "infernodragon0", "name": "Inferno Dragon" },
+      "source_branch": "new-thing",
+      "target_branch": "main",
+      "sha": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+      "labels": [],
+      "web_url": "https://gitlab.com/group/sub/proj/-/merge_requests/13",
+      "created_at": "2026-10-09T11:00:00.000Z",
+      "updated_at": "2026-10-09T11:00:00.000Z"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/issues?state=opened&order_by=updated_at&sort=desc&per_page=30&page=1",
+    "body": [
+      {
+        "id": 900,
+        "iid": 7,
+        "title": "Crash on open",
+        "description": "Steps...",
+        "state": "opened",
+        "author": { "username": "tanuki", "name": "Tanuki" },
+        "assignees": [{ "username": "infernodragon0", "name": "Inferno Dragon" }],
+        "labels": ["bug"],
+        "user_notes_count": 3,
+        "web_url": "https://gitlab.com/group/sub/proj/-/issues/7",
+        "created_at": "2026-10-01T09:00:00.000Z",
+        "updated_at": "2026-10-05T09:00:00.000Z"
+      },
+      {
+        "id": 901,
+        "iid": 6,
+        "title": "Old report",
+        "description": null,
+        "state": "closed",
+        "author": null,
+        "assignees": [],
+        "labels": [],
+        "user_notes_count": 0,
+        "web_url": "https://gitlab.com/group/sub/proj/-/issues/6",
+        "created_at": "2026-09-01T09:00:00.000Z",
+        "updated_at": "2026-09-05T09:00:00.000Z"
+      }
+    ]
+  },
+  {
+    "method": "POST",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/issues",
+    "status": 201,
+    "body": {
+      "iid": 8,
+      "title": "Crash on open",
+      "description": "Steps...",
+      "state": "opened",
+      "author": { "username": "infernodragon0" },
+      "assignees": [],
+      "labels": ["bug", "ui"],
+      "user_notes_count": 0,
+      "web_url": "https://gitlab.com/group/sub/proj/-/issues/8",
+      "created_at": "2026-10-09T11:00:00.000Z",
+      "updated_at": "2026-10-09T11:00:00.000Z"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/issues/7/notes",
+    "status": 201,
+    "body": {
+      "id": 9001,
+      "body": "On it",
+      "author": { "username": "infernodragon0", "name": "Inferno Dragon" },
+      "system": false,
+      "created_at": "2026-10-09T11:05:00.000Z"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines?ref=main&per_page=1",
+    "body": [
+      { "id": 100, "status": "running", "ref": "main", "sha": "ffffffffffffffffffffffffffffffffffffffff", "web_url": "https://gitlab.com/group/sub/proj/-/pipelines/100" }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines/100/jobs?per_page=100",
+    "body": [
+      { "id": 1, "name": "build", "stage": "build", "status": "success", "allow_failure": false, "web_url": "https://gitlab.com/group/sub/proj/-/jobs/1" },
+      { "id": 2, "name": "test", "stage": "test", "status": "running", "allow_failure": false, "web_url": "https://gitlab.com/group/sub/proj/-/jobs/2" },
+      { "id": 3, "name": "lint", "stage": "test", "status": "failed", "allow_failure": true, "web_url": "https://gitlab.com/group/sub/proj/-/jobs/3" },
+      { "id": 4, "name": "deploy", "stage": "deploy", "status": "manual", "allow_failure": true, "web_url": "https://gitlab.com/group/sub/proj/-/jobs/4" }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines?ref=no-ci&per_page=1",
+    "body": []
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines?sha=0123456789abcdef0123456789abcdef01234567&per_page=1",
+    "body": [
+      { "id": 101, "status": "failed", "sha": "0123456789abcdef0123456789abcdef01234567", "web_url": "https://gitlab.com/group/sub/proj/-/pipelines/101" }
+    ]
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines/101/jobs?per_page=100",
+    "status": 403,
+    "body": { "message": "403 Forbidden" }
+  }
+]

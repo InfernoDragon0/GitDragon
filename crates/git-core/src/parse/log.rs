@@ -9,14 +9,24 @@ use super::{ParseError, ParseResult, lossy, parse_i64, parse_oid, parse_uint};
 /// Dates come from `--date=raw` (`<unix> <+hhmm>`). Free text goes last: subject, then body.
 pub const FORMAT: &str = "%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%D%x1f%s%x1f%b";
 
+/// [`FORMAT`] with only the `Co-authored-by` trailers as the body, for the commit graph: bodies
+/// can be large and the graph only shows subjects and avatars (the details panel reads the full
+/// message on demand). [`LogParser`] accepts both; [`co_authors`] reads either body.
+pub const GRAPH_FORMAT: &str = "%H%x1f%P%x1f%an%x1f%ae%x1f%ad%x1f%cn%x1f%ce%x1f%cd%x1f%D%x1f%s%x1f%(trailers:key=Co-authored-by)";
+
 /// Number of `%x1f` separators in [`FORMAT`] before the body.
 const SEPARATORS: usize = 10;
 
 /// Arguments after `log` (callers add revisions, `-n`, `--skip`, then `--end-of-options` / `--`).
 pub fn args() -> Vec<String> {
+    args_with(FORMAT)
+}
+
+/// [`args`] with [`FORMAT`] or [`GRAPH_FORMAT`].
+pub fn args_with(format: &str) -> Vec<String> {
     vec![
         "-z".into(),
-        format!("--format={FORMAT}"),
+        format!("--format={format}"),
         "--date=raw".into(),
         "--decorate=full".into(),
         "--no-color".into(),
@@ -122,6 +132,74 @@ impl LogParser {
     }
 }
 
+/// `Co-authored-by: Name <email>` trailers in a body, as (name, email), in order, without
+/// repeats. Lines that are not such a trailer are skipped.
+pub fn co_authors(body: &[u8]) -> Vec<(BString, BString)> {
+    const KEY: &[u8] = b"co-authored-by:";
+    let mut found: Vec<(BString, BString)> = Vec::new();
+    for line in body.lines() {
+        let line = line.trim();
+        if line.len() <= KEY.len() || !line[..KEY.len()].eq_ignore_ascii_case(KEY) {
+            continue;
+        }
+        let value = line[KEY.len()..].trim();
+        let (name, email) = match (value.find_byte(b'<'), value.rfind_byte(b'>')) {
+            (Some(open), Some(close)) if open < close => {
+                (value[..open].trim(), value[open + 1..close].trim())
+            }
+            _ => (value, &b""[..]),
+        };
+        if name.is_empty() && email.is_empty() {
+            continue;
+        }
+        let entry = (BString::from(name), BString::from(email));
+        if !found.iter().any(|(n, e)| {
+            if e.is_empty() && entry.1.is_empty() {
+                n == &entry.0
+            } else {
+                e.eq_ignore_ascii_case(&entry.1)
+            }
+        }) {
+            found.push(entry);
+        }
+    }
+    found
+}
+
+/// The first line of a commit body, as a one-line description beside the subject: trailers
+/// (`Signed-off-by:`, `Co-authored-by:`, `Change-Id:` ...) are not descriptions. At most
+/// `max` characters.
+pub fn short_description(body: &[u8], max: usize) -> Option<String> {
+    let is_trailer = |line: &[u8]| {
+        line.find_byte(b':').is_some_and(|colon| {
+            let key = &line[..colon];
+            const KEYS: [&[u8]; 7] = [
+                b"Fixes",
+                b"Link",
+                b"Cc",
+                b"Closes",
+                b"Resolves",
+                b"Bug",
+                b"Refs",
+            ];
+            !key.is_empty()
+                && key.len() < 40
+                && key.iter().all(|&b| b.is_ascii_alphanumeric() || b == b'-')
+                && (key.contains(&b'-') || KEYS.contains(&key))
+                && line.get(colon + 1) == Some(&b' ')
+        })
+    };
+    let line = body
+        .lines()
+        .map(|l| l.trim())
+        .find(|l| !l.is_empty() && !is_trailer(l))?;
+    let text = line.to_str_lossy();
+    Some(match text.char_indices().nth(max) {
+        Some((cut, _)) => format!("{}\u{2026}", &text[..cut]),
+        None => text.into_owned(),
+    })
+}
+
 /// Convenience for whole output.
 pub fn parse(output: &[u8]) -> ParseResult<Vec<Commit>> {
     let mut parser = LogParser::new();
@@ -143,7 +221,7 @@ fn parse_commit(record: &[u8]) -> Result<Commit, &'static str> {
     let committer = signature(field()?, field()?, field()?).ok_or("bad committer")?;
     let (refs, head_target) = decorations(field()?);
     let subject = BString::from(field()?);
-    let body = BString::from(field()?);
+    let body = fields.next().map(BString::from).unwrap_or_default();
     Ok(Commit {
         id,
         parents,
@@ -217,5 +295,34 @@ fn label_name(label: &RefLabel) -> Option<&str> {
         | RefLabel::RemoteBranch(name)
         | RefLabel::Tag(name)
         | RefLabel::Other(name) => Some(name),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn short_descriptions() {
+        let body = b"\nThe lane layout now reuses freed columns.\nMore detail here.\n\nSigned-off-by: A <a@b>\n";
+        assert_eq!(
+            short_description(body, 200).as_deref(),
+            Some("The lane layout now reuses freed columns.")
+        );
+        // Trailers only: no description.
+        assert_eq!(
+            short_description(b"Signed-off-by: A <a@b>\nChange-Id: I123\n", 200),
+            None
+        );
+        assert_eq!(short_description(b"", 200), None);
+        // A colon inside prose is not a trailer.
+        assert_eq!(
+            short_description(b"Note: see the docs", 200).as_deref(),
+            Some("Note: see the docs")
+        );
+        assert_eq!(
+            short_description("äöüäöü".as_bytes(), 3).as_deref(),
+            Some("äöü…")
+        );
     }
 }

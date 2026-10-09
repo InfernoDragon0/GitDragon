@@ -43,6 +43,9 @@ pub struct SavedState {
     /// UI zoom (1.0 = 100%).
     #[serde(default)]
     pub zoom: Option<f32>,
+    /// Look up author avatars on Gravatar (sends email hashes there; off by default).
+    #[serde(default)]
+    pub gravatar: Option<bool>,
 }
 
 impl SavedState {
@@ -115,6 +118,11 @@ fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map_or(0, |d| d.as_secs())
+}
+
+/// The app's config folder (state.json, accounts.json).
+pub fn config_dir() -> Option<PathBuf> {
+    state_path().and_then(|p| p.parent().map(Path::to_path_buf))
 }
 
 fn state_path() -> Option<PathBuf> {

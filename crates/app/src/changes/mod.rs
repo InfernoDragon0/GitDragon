@@ -859,6 +859,12 @@ impl ChangesView {
                     _ => palette.accent,
                 };
                 let stage = section != Section::Staged;
+                let tab = self.tab.read(cx);
+                let attrs = tab.lfs_attrs.get(&entry.path).copied().unwrap_or_default();
+                let lock = tab
+                    .lock_on(&entry.path)
+                    .map(|l| (l.ours, SharedString::from(l.owner.clone())));
+                let lock_path = entry.path.clone();
                 let path = entry.path.clone();
                 let toggle_entry = entry.clone();
                 let discard_entry = entry.clone();
@@ -896,10 +902,49 @@ impl ChangesView {
                             .truncate()
                             .child(SharedString::from(name)),
                     )
+                    .when(attrs.lfs, |d| d.child(lfs_badge(&palette)))
+                    .when_some(lock.clone(), |d, (ours, owner)| {
+                        d.child(lock_badge(ix, ours, owner, &palette))
+                    })
                     .child(
                         h_flex()
                             .invisible()
                             .group_hover("change-row", |s| s.visible())
+                            // Lockable LFS files: lock before editing so nobody else does.
+                            .when(
+                                attrs.lockable && lock.as_ref().is_none_or(|(ours, _)| *ours),
+                                |d| {
+                                    let locked = lock.is_some();
+                                    d.child(
+                                        Button::new(ElementId::NamedInteger(
+                                            "row-lock".into(),
+                                            ix as u64,
+                                        ))
+                                        .ghost()
+                                        .xsmall()
+                                        .icon(if locked {
+                                            IconName::LockOpen
+                                        } else {
+                                            IconName::Lock
+                                        })
+                                        .tooltip(if locked {
+                                            "Unlock (let others edit it)"
+                                        } else {
+                                            "Lock (stop others editing it)"
+                                        })
+                                        .disabled(busy)
+                                        .on_click(
+                                            cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                                cx.stop_propagation();
+                                                let path = lock_path.clone();
+                                                this.tab.update(cx, |tab, cx| {
+                                                    tab.set_lock(path, !locked, false, cx)
+                                                });
+                                            }),
+                                        ),
+                                    )
+                                },
+                            )
                             .when(
                                 matches!(section, Section::Unstaged | Section::Untracked),
                                 |d| {
@@ -979,6 +1024,26 @@ impl ChangesView {
         let Some(sel) = self.selected.clone() else {
             return message("Select a file to see its changes.".into());
         };
+        // An LFS file's text diff is its pointer: show the size change instead.
+        if let Some(change) = &model.lfs {
+            return v_flex()
+                .size_full()
+                .child(
+                    div()
+                        .h(zoomed(32., cx))
+                        .px_2()
+                        .flex()
+                        .items_center()
+                        .border_b_1()
+                        .border_color(palette.border)
+                        .text_sm()
+                        .text_color(palette.emph)
+                        .truncate()
+                        .child(SharedString::from(sel.path.to_str_lossy().into_owned())),
+                )
+                .child(ui::diff::lfs_summary(change, palette, cx))
+                .into_any_element();
+        }
         let busy = self.is_busy();
         let picked = self.picked_count();
         let line_staging = matches!(sel.section, Section::Staged | Section::Unstaged);
@@ -1257,4 +1322,40 @@ impl Render for ChangesView {
                     ),
             )
     }
+}
+
+/// "LFS" chip on a file stored in Git LFS.
+fn lfs_badge(palette: &Palette) -> impl IntoElement {
+    div()
+        .flex_none()
+        .px_1()
+        .rounded_sm()
+        .text_xs()
+        .text_color(palette.accent)
+        .bg(palette.accent.opacity(0.14))
+        .child("LFS")
+}
+
+/// Lock chip: green when the lock is yours, warning colour with the owner's name otherwise.
+fn lock_badge(ix: usize, ours: bool, owner: SharedString, palette: &Palette) -> impl IntoElement {
+    let color = if ours { palette.ok } else { palette.warn };
+    let tip: SharedString = if ours {
+        "Locked by you".into()
+    } else {
+        format!("Locked by {owner}: you cannot push changes to it").into()
+    };
+    h_flex()
+        .id(ElementId::NamedInteger("row-lock-badge".into(), ix as u64))
+        .flex_none()
+        .gap_0p5()
+        .px_1()
+        .rounded_sm()
+        .text_xs()
+        .text_color(color)
+        .bg(color.opacity(0.14))
+        .child(gpui_kit::component::Icon::new(IconName::Lock).xsmall())
+        .when(!ours, |d| d.child(owner))
+        .tooltip(move |window, cx| {
+            gpui_kit::component::tooltip::Tooltip::new(tip.clone()).build(window, cx)
+        })
 }

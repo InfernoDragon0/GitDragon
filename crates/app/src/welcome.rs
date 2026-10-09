@@ -7,9 +7,9 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    App, ClickEvent, Context, ElementId, EventEmitter, InteractiveElement as _, IntoElement,
-    ParentElement as _, Render, SharedString, StatefulInteractiveElement as _, Styled as _, Window,
-    div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
+    App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, InteractiveElement as _,
+    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Window, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
 use ui::Palette;
 
@@ -30,16 +30,29 @@ pub struct Welcome {
     recent: Vec<Row>,
     /// Why git can't be used (not installed / too old); shown as a banner.
     git_problem: Option<SharedString>,
+    /// Tracked on the screen's root so actions and shortcuts dispatched here reach the
+    /// workspace.
+    focus: FocusHandle,
+    /// Take focus on the next render (set when the screen comes back after a repo).
+    focus_on_show: bool,
 }
 
 impl EventEmitter<WelcomeEvent> for Welcome {}
 
 impl Welcome {
-    pub fn new() -> Self {
+    pub fn new(cx: &mut Context<Self>) -> Self {
         Self {
             recent: Vec::new(),
             git_problem: None,
+            focus: cx.focus_handle(),
+            focus_on_show: true,
         }
+    }
+
+    /// The screen is shown again: the element that had focus (a repo's view) is gone, and
+    /// GPUI would send actions and key bindings to the window root, where nothing handles them.
+    pub fn focus_on_show(&mut self) {
+        self.focus_on_show = true;
     }
 
     pub fn set_recent(&mut self, recent: &[RecentRepo], cx: &mut Context<Self>) {
@@ -59,6 +72,7 @@ impl Welcome {
     }
 
     fn action_button(
+        focus: FocusHandle,
         id: &'static str,
         icon: IconName,
         label: &'static str,
@@ -71,7 +85,10 @@ impl Welcome {
             .label(label)
             .tooltip_with_action(label, &tooltip_action, None)
             .on_click(move |_: &ClickEvent, window: &mut Window, cx: &mut App| {
-                window.dispatch_action(Box::new(action.clone()), cx);
+                // From this screen's node: `window.dispatch_action` starts at the focused
+                // element, which may be a repo view that is no longer on screen.
+                window.focus(&focus, cx);
+                focus.dispatch_action(&action, window, cx);
             })
     }
 
@@ -146,7 +163,10 @@ impl Welcome {
 }
 
 impl Render for Welcome {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if std::mem::take(&mut self.focus_on_show) {
+            window.focus(&self.focus, cx);
+        }
         let palette = Palette::of(cx);
         let [g0, g1, g2, g3] = palette.gradient;
 
@@ -183,18 +203,21 @@ impl Render for Welcome {
         let actions = h_flex()
             .gap_2()
             .child(Self::action_button(
+                self.focus.clone(),
                 "welcome-open",
                 IconName::FolderOpen,
                 "Open repository",
                 OpenRepository,
             ))
             .child(Self::action_button(
+                self.focus.clone(),
                 "welcome-clone",
                 IconName::Download,
                 "Clone",
                 CloneRepository,
             ))
             .child(Self::action_button(
+                self.focus.clone(),
                 "welcome-new",
                 IconName::FolderPlus,
                 "New repository",
@@ -229,6 +252,7 @@ impl Render for Welcome {
 
         div()
             .id("welcome")
+            .track_focus(&self.focus)
             .size_full()
             .overflow_y_scroll()
             .bg(palette.panel)

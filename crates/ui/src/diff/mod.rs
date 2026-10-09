@@ -1,4 +1,4 @@
-﻿//! Diff view building blocks shared by the Changes panel and commit details: the row model and
+//! Diff view building blocks shared by the Changes panel and commit details: the row model and
 //! one rendered line (gutter, sign, text with word-level emphasis). The panels own the virtual
 //! list and the hunk / line actions.
 
@@ -9,7 +9,8 @@ pub mod words;
 use git_core::parse::diff::LineKind;
 use gpui_kit::component::{ActiveTheme as _, h_flex};
 use gpui_kit::{
-    App, Div, Hsla, ParentElement as _, Styled as _, StyledText, div, prelude::FluentBuilder as _,
+    AnyElement, App, Div, Hsla, IntoElement as _, ParentElement as _, SharedString, Styled as _,
+    StyledText, div, prelude::FluentBuilder as _,
 };
 
 pub use model::{DiffModel, DiffRow, Layout, LineView};
@@ -18,9 +19,81 @@ use crate::{Palette, zoomed};
 
 /// Height of every diff row at 100% zoom (the list is uniform; use [`zoomed`]).
 pub const ROW_HEIGHT: f32 = 22.;
-/// Diff text size: a touch larger than the 12 px UI mono size, for reading code.
-pub const FONT_SIZE: f32 = 13.5;
 const GUTTER: f32 = 48.;
+
+/// Replaces the pointer text diff of a Git LFS file: "LFS object · 12.0 MB → 14.2 MB" and the
+/// short object ids.
+pub fn lfs_summary(
+    change: &git_core::lfs::PointerChange,
+    palette: &Palette,
+    cx: &App,
+) -> AnyElement {
+    use git_core::lfs::human_size;
+    let size = |p: &Option<git_core::lfs::Pointer>| p.as_ref().map(|p| human_size(p.size));
+    let (title, color) = match (size(&change.old), size(&change.new)) {
+        (Some(old), Some(new)) => (format!("{old} \u{2192} {new}"), palette.warn),
+        (None, Some(new)) => (format!("Added \u{b7} {new}"), palette.ok),
+        (Some(old), None) => (format!("Deleted \u{b7} {old}"), palette.error),
+        (None, None) => (String::new(), palette.muted),
+    };
+    let short = |p: &Option<git_core::lfs::Pointer>| {
+        p.as_ref().map_or("\u{2014}".to_string(), |p| {
+            let hex = p.oid.strip_prefix("sha256:").unwrap_or(&p.oid);
+            hex[..hex.len().min(12)].to_string()
+        })
+    };
+    let mono = cx.theme().mono_font_family.clone();
+    div()
+        .size_full()
+        .p_4()
+        .child(
+            gpui_kit::component::v_flex()
+                .gap_1p5()
+                .p_3()
+                .rounded(zoomed(8., cx))
+                .border_1()
+                .border_color(palette.border)
+                .bg(palette.panel2)
+                .child(
+                    h_flex()
+                        .gap_2()
+                        .child(
+                            div()
+                                .px_1p5()
+                                .rounded_sm()
+                                .text_xs()
+                                .font_weight(gpui_kit::FontWeight::BOLD)
+                                .text_color(palette.accent)
+                                .bg(palette.accent.opacity(0.14))
+                                .child("LFS"),
+                        )
+                        .child(
+                            div()
+                                .text_sm()
+                                .text_color(palette.emph)
+                                .child(SharedString::from(format!("LFS object \u{b7} {title}"))),
+                        )
+                        .child(div().size(zoomed(8., cx)).rounded_full().bg(color)),
+                )
+                .child(
+                    div()
+                        .text_xs()
+                        .font_family(mono)
+                        .text_color(palette.muted)
+                        .child(SharedString::from(format!(
+                            "{} \u{2192} {}",
+                            short(&change.old),
+                            short(&change.new)
+                        ))),
+                )
+                .child(
+                    div().text_xs().text_color(palette.muted).child(
+                        "The content lives in Git LFS; git tracks this small pointer to it.",
+                    ),
+                ),
+        )
+        .into_any_element()
+}
 
 /// Background tints for a line kind: (line, emphasised words).
 pub fn tints(kind: LineKind, palette: &Palette) -> Option<(Hsla, Hsla)> {
@@ -56,12 +129,14 @@ pub fn line(
         view.text.len(),
     ));
     let mono = cx.theme().mono_font_family.clone();
+    // The UI's mono size, which already follows the app zoom.
+    let size = cx.theme().mono_font_size;
     h_flex()
         .h(zoomed(ROW_HEIGHT, cx))
         .w_full()
         .min_w_0()
         .font_family(mono)
-        .text_size(zoomed(FONT_SIZE, cx))
+        .text_size(size)
         .when_some(tint, |d, (bg, _)| d.bg(bg))
         .when(selected, |d| d.bg(palette.accent_soft))
         .children(numbers.iter().map(|n| {
@@ -107,4 +182,72 @@ pub fn line(
 /// An empty filler cell for the side of a split row with no line.
 pub fn filler(palette: &Palette, cx: &App) -> Div {
     div().h(zoomed(ROW_HEIGHT, cx)).w_full().bg(palette.panel2)
+}
+
+/// One row of a read-only diff (commit details): hunk header, unified line or split pair.
+pub fn read_only_row(
+    model: &DiffModel,
+    layout: Layout,
+    ix: usize,
+    palette: &Palette,
+    cx: &App,
+) -> Option<AnyElement> {
+    Some(match *model.rows(layout).get(ix)? {
+        DiffRow::Hunk { hunk } => {
+            let header = &model.file.hunks.get(hunk)?.header;
+            h_flex()
+                .h(zoomed(ROW_HEIGHT, cx))
+                .w_full()
+                .px_2()
+                .bg(palette.panel2)
+                .text_xs()
+                .text_color(palette.muted)
+                .child(div().min_w_0().truncate().child(SharedString::from(
+                    String::from_utf8_lossy(header).into_owned(),
+                )))
+                .into_any_element()
+        }
+        DiffRow::Line { hunk, line } => {
+            let l = model.file.hunks.get(hunk)?.lines.get(line)?;
+            let view = model.lines.get(hunk)?.get(line)?;
+            self::line(
+                view,
+                l.kind,
+                &[l.old_lineno, l.new_lineno],
+                false,
+                palette,
+                cx,
+            )
+            .into_any_element()
+        }
+        DiffRow::Pair { hunk, left, right } => {
+            let side = |slot: Option<usize>, old: bool| -> AnyElement {
+                let found = slot.and_then(|i| {
+                    Some((
+                        model.file.hunks.get(hunk)?.lines.get(i)?,
+                        model.lines.get(hunk)?.get(i)?,
+                    ))
+                });
+                match found {
+                    Some((l, view)) => {
+                        let number = if old { l.old_lineno } else { l.new_lineno };
+                        self::line(view, l.kind, &[number], false, palette, cx).into_any_element()
+                    }
+                    None => filler(palette, cx).into_any_element(),
+                }
+            };
+            h_flex()
+                .w_full()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .border_r_1()
+                        .border_color(palette.border)
+                        .child(side(left, true)),
+                )
+                .child(div().flex_1().min_w_0().child(side(right, false)))
+                .into_any_element()
+        }
+    })
 }

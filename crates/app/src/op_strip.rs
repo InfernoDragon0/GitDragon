@@ -106,7 +106,13 @@ impl Render for OpStrip {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(cx);
         let (dot, text) = match (&self.running, &self.last) {
-            (Some(run), _) => (palette.now, format!("Running: {}", run.command)),
+            (Some(run), _) => (
+                palette.now,
+                match &run.progress {
+                    Some(progress) => format!("Running: {} — {progress}", run.command),
+                    None => format!("Running: {}", run.command),
+                },
+            ),
             (None, Some(last)) => match last.outcome {
                 Outcome::Ok | Outcome::Running => (
                     palette.ok,

@@ -24,11 +24,15 @@ use ui::{Appearance, Mode, Palette, theme};
 
 use crate::actions::*;
 use crate::clone_dialog::{CloneDialog, CloneEvent};
+use crate::graph::DetailsPanel;
+use crate::graph::link::GraphLink;
 use crate::op_strip::{OpStrip, OpStripEvent};
-use crate::panels::{CenterView, Placeholder};
+use crate::panels::CenterView;
 use crate::rail::{ActivityRail, View};
 use crate::repo_tab::RepoTab;
+use crate::sidebar::SidebarPanel;
 use crate::state::{self, SavedState};
+use crate::toolbar::RepoToolbar;
 use crate::welcome::{Welcome, WelcomeEvent};
 
 const DOCK_LAYOUT_VERSION: usize = 1;
@@ -40,6 +44,8 @@ const SAVE_DELAY: Duration = Duration::from_millis(400);
 pub struct Workspace {
     dock: Entity<DockArea>,
     center: Entity<CenterView>,
+    sidebar: Entity<SidebarPanel>,
+    toolbar: Entity<RepoToolbar>,
     welcome: Entity<Welcome>,
     op_strip: Entity<OpStrip>,
     focus: FocusHandle,
@@ -59,22 +65,15 @@ impl Workspace {
 
         let (dock, _skin) = DockSkin::dock_area("workspace", Some(DOCK_LAYOUT_VERSION), window, cx);
         let welcome = cx.new(|cx| {
-            let mut welcome = Welcome::new();
+            let mut welcome = Welcome::new(cx);
             welcome.set_recent(&state.recent, cx);
             welcome
         });
-        let center = cx.new(|cx| CenterView::new(welcome.clone(), cx));
+        let link = cx.new(|_| GraphLink::default());
+        let center = cx.new(|cx| CenterView::new(welcome.clone(), link.clone(), cx));
         let op_strip = cx.new(|_| OpStrip::new());
-        let sidebar = cx.new(|cx| {
-            Placeholder::new(
-                "sidebar",
-                "Branches",
-                "Branches, remotes, tags, stashes and submodules.",
-                cx,
-            )
-        });
-        let details = cx
-            .new(|cx| Placeholder::new("details", "Details", "Commit details and file diffs.", cx));
+        let sidebar = cx.new(|cx| SidebarPanel::new(link.clone(), window, cx));
+        let details = cx.new(|cx| DetailsPanel::new(link, cx));
 
         let layout = state.dock.unwrap_or(state::DockLayout {
             left_open: true,
@@ -90,7 +89,7 @@ impl Workspace {
             );
             area.set_dock(
                 DockPlacement::Left,
-                DockLayout::tabs().panel_view(panel_handle(sidebar), cx),
+                DockLayout::tabs().panel_view(panel_handle(sidebar.clone()), cx),
                 window,
                 cx,
             );
@@ -130,10 +129,17 @@ impl Workspace {
             }),
             cx.observe_global::<Appearance>(|this, cx| this.schedule_save(cx)),
             cx.observe_global::<ui::Zoom>(|this, cx| this.schedule_save(cx)),
+            cx.subscribe(
+                &crate::avatars::handle(cx).expect("avatars::init runs before the workspace"),
+                |this, _, _: &crate::avatars::SettingChanged, cx| this.schedule_save(cx),
+            ),
             cx.subscribe(&op_strip, |this, _, event: &OpStripEvent, cx| match event {
                 OpStripEvent::Cancel => {
                     if let Some(changes) = this.center.read(cx).active_changes() {
                         changes.update(cx, |view, cx| view.cancel_op(cx));
+                    }
+                    if let Some(tab) = this.active.and_then(|ix| this.tabs.get(ix)).cloned() {
+                        tab.update(cx, |tab, cx| tab.cancel_op(cx));
                     }
                 }
             }),
@@ -142,6 +148,8 @@ impl Workspace {
         let mut workspace = Self {
             dock,
             center,
+            sidebar,
+            toolbar: cx.new(|_| RepoToolbar::new()),
             welcome,
             op_strip,
             focus,
@@ -168,6 +176,8 @@ impl Workspace {
                 Ok(git) => {
                     tracing::info!(path = %git.path.display(), version = %git.version, "git");
                     let runner = GitRunner::new(git);
+                    // Stored tokens reach git through our askpass helper (never argv / URLs).
+                    runner.set_env(crate::accounts::askpass_env(cx));
                     this.op_strip
                         .update(cx, |strip, cx| strip.listen(&runner, cx));
                     this.runner = Some(runner);
@@ -229,6 +239,16 @@ impl Workspace {
     fn activate(&mut self, ix: Option<usize>, cx: &mut Context<Self>) {
         self.active = ix.filter(|&ix| ix < self.tabs.len());
         let repo = self.active.map(|ix| self.tabs[ix].clone());
+        self.sidebar
+            .update(cx, |sidebar, cx| sidebar.set_repo(repo.clone(), cx));
+        self.toolbar
+            .update(cx, |toolbar, cx| toolbar.set_repo(repo.clone(), cx));
+        if repo.is_none() {
+            self.welcome.update(cx, |welcome, cx| {
+                welcome.focus_on_show();
+                cx.notify();
+            });
+        }
         self.center
             .update(cx, |center, cx| center.set_repo(repo, cx));
         self.sync_strip(cx);
@@ -405,6 +425,9 @@ impl Workspace {
         self.state.appearance = Some(theme::appearance(cx).key());
         let zoom = theme::zoom(cx);
         self.state.zoom = (zoom != ui::Zoom::default()).then_some(zoom.0);
+        self.state.gravatar = crate::avatars::handle(cx)
+            .map(|a| a.read(cx).gravatar())
+            .filter(|on| *on);
         let snapshot = self.state.clone();
         cx.background_executor()
             .spawn(async move { snapshot.save() })
@@ -639,6 +662,9 @@ impl Render for Workspace {
                 }
             }))
             .child(self.render_title_bar(cx))
+            .when(self.toolbar.read(cx).has_repo(), |d| {
+                d.child(self.toolbar.clone())
+            })
             .child(
                 h_flex()
                     .flex_1()

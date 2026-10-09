@@ -120,6 +120,11 @@ pub struct GitCommand {
     literal_pathspecs: bool,
     timeout: Option<Duration>,
     stdin: Option<Vec<u8>>,
+    /// `GIT_LFS_PROGRESS`: where git-lfs writes per-file transfer progress (set by the
+    /// runner for write commands).
+    lfs_progress: Option<PathBuf>,
+    /// Extra variables for this command only (editor overrides for continue / rebase).
+    env: Vec<(OsString, OsString)>,
 }
 
 impl GitCommand {
@@ -140,6 +145,8 @@ impl GitCommand {
             literal_pathspecs: false,
             timeout,
             stdin: None,
+            lfs_progress: None,
+            env: Vec::new(),
         }
     }
 
@@ -200,6 +207,13 @@ impl GitCommand {
         self
     }
 
+    /// Sets a variable for this command only. Values must not be secrets (see
+    /// [`GitRunner::set_env`]).
+    pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
+        self.env.push((key.into(), value.into()));
+        self
+    }
+
     pub fn stdin(mut self, input: Vec<u8>) -> Self {
         self.stdin = Some(input);
         self
@@ -213,8 +227,13 @@ impl GitCommand {
         &self.cwd
     }
 
-    /// `git status --porcelain=v2 ...` as shown in the operation strip (safety flags omitted).
+    /// `git status --porcelain=v2 ...` as shown in the operation strip (safety flags omitted,
+    /// secrets and URL userinfo masked).
     pub fn display(&self) -> String {
+        crate::redact::redact(&self.raw_display()).into_owned()
+    }
+
+    fn raw_display(&self) -> String {
         let mut out = String::from("git");
         for arg in &self.args {
             let arg = arg.to_string_lossy();
@@ -241,6 +260,12 @@ impl GitCommand {
         harden_std_command(&mut cmd);
         if self.literal_pathspecs {
             cmd.env("GIT_LITERAL_PATHSPECS", "1");
+        }
+        if let Some(file) = &self.lfs_progress {
+            cmd.env("GIT_LFS_PROGRESS", file);
+        }
+        for (key, value) in &self.env {
+            cmd.env(key, value);
         }
         // Stdio must be set after the conversion: `From<std::process::Command>` drops it.
         let mut cmd = async_process::Command::from(cmd);
@@ -302,6 +327,8 @@ impl GitOutput {
 pub struct GitRunner {
     git: Arc<GitBinary>,
     log: CommandLog,
+    /// Extra variables for every spawned git (the askpass hook). Never holds secrets.
+    env: Arc<Mutex<Vec<(OsString, OsString)>>>,
 }
 
 impl GitRunner {
@@ -309,6 +336,7 @@ impl GitRunner {
         Self {
             git: Arc::new(git),
             log: CommandLog::default(),
+            env: Arc::default(),
         }
     }
 
@@ -325,6 +353,13 @@ impl GitRunner {
         &self.log
     }
 
+    /// Sets variables added to every git this runner (and its clones) spawns from now on,
+    /// e.g. `GIT_ASKPASS`. Values must not be secrets: child environments are visible to
+    /// other processes of the same user.
+    pub fn set_env(&self, vars: Vec<(OsString, OsString)>) {
+        *self.env.lock().unwrap_or_else(|p| p.into_inner()) = vars;
+    }
+
     /// Runs to completion; a non-zero exit is an error. Returns stdout.
     pub async fn run(&self, cmd: GitCommand) -> Result<Vec<u8>> {
         let display = cmd.display();
@@ -338,9 +373,10 @@ impl GitRunner {
 
     /// Runs to completion and returns the exit code instead of failing on it (for commands
     /// where a non-zero exit is an answer, e.g. `merge-base --is-ancestor`).
-    pub async fn output(&self, cmd: GitCommand) -> Result<GitOutput> {
+    pub async fn output(&self, mut cmd: GitCommand) -> Result<GitOutput> {
         let display = cmd.display();
         let mut guard = self.log.start(&cmd);
+        let progress = LfsProgress::for_command(&mut cmd, guard.id);
         let mut child = self.spawn(&cmd)?;
 
         let stdin = child.stdin.take();
@@ -387,18 +423,26 @@ impl GitRunner {
             })
         };
 
-        let result = match cmd.timeout {
-            Some(after) => {
-                let timed_out = async {
-                    async_io::Timer::after(after).await;
-                    Err(GitError::Timeout {
-                        command: display.clone(),
-                        after,
-                    })
-                };
-                future::or(async { work.await.map_err(GitError::Io) }, timed_out).await
+        let run = async {
+            match cmd.timeout {
+                Some(after) => {
+                    let timed_out = async {
+                        async_io::Timer::after(after).await;
+                        Err(GitError::Timeout {
+                            command: display.clone(),
+                            after,
+                        })
+                    };
+                    future::or(async { work.await.map_err(GitError::Io) }, timed_out).await
+                }
+                None => work.await.map_err(GitError::Io),
             }
-            None => work.await.map_err(GitError::Io),
+        };
+        let result = match &progress {
+            Some(progress) => {
+                future::or(run, async { match progress.watch(&self.log).await {} }).await
+            }
+            None => run.await,
         };
         guard.finish(match &result {
             Ok(out) if out.success() => Outcome::Ok,
@@ -412,6 +456,22 @@ impl GitRunner {
     /// Runs to completion, reporting `--progress` lines from stderr as they arrive (clone,
     /// fetch, push). A non-zero exit is an error. Drop the future to cancel.
     pub async fn run_with_progress(
+        &self,
+        mut cmd: GitCommand,
+        on_progress: impl FnMut(Progress) + Send,
+    ) -> Result<Vec<u8>> {
+        let id = self.log.next_id();
+        let progress = LfsProgress::for_command(&mut cmd, id);
+        let run = self.run_with_progress_inner(cmd, on_progress);
+        match &progress {
+            Some(progress) => {
+                future::or(run, async { match progress.watch(&self.log).await {} }).await
+            }
+            None => run.await,
+        }
+    }
+
+    async fn run_with_progress_inner(
         &self,
         cmd: GitCommand,
         mut on_progress: impl FnMut(Progress) + Send,
@@ -490,12 +550,14 @@ impl GitRunner {
 
     fn spawn(&self, cmd: &GitCommand) -> Result<Child> {
         tracing::debug!(command = %cmd.display(), cwd = %cmd.cwd.display(), "git");
-        cmd.to_command(&self.git)
-            .spawn()
-            .map_err(|source| GitError::Spawn {
-                program: self.git.path.clone(),
-                source,
-            })
+        let mut command = cmd.to_command(&self.git);
+        for (key, value) in self.env.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+            command.env(key, value);
+        }
+        command.spawn().map_err(|source| GitError::Spawn {
+            program: self.git.path.clone(),
+            source,
+        })
     }
 }
 
@@ -563,7 +625,7 @@ async fn read_capped<R: futures_lite::AsyncRead + Unpin>(
     Ok(kept.into())
 }
 
-fn failed(command: String, code: Option<i32>, stderr: &[u8]) -> GitError {
+pub(crate) fn failed(command: String, code: Option<i32>, stderr: &[u8]) -> GitError {
     let tail = stderr_tail(stderr, 8);
     GitError::Failed {
         command,
@@ -597,6 +659,8 @@ pub struct CommandRecord {
     pub started: SystemTime,
     pub duration: Option<Duration>,
     pub outcome: Outcome,
+    /// Latest transfer progress while running (Git LFS), e.g. `LFS download 3/12 · a.umap 50%`.
+    pub progress: Option<String>,
 }
 
 type Listener = Arc<dyn Fn(&CommandRecord) + Send + Sync>;
@@ -643,6 +707,7 @@ impl CommandLog {
                 started: SystemTime::now(),
                 duration: None,
                 outcome: Outcome::Running,
+                progress: None,
             };
             inner.records.push_back(record.clone());
             if inner.records.len() > LOG_CAP {
@@ -661,6 +726,28 @@ impl CommandLog {
         }
     }
 
+    /// The id the next [`Self::start`] hands out (for files named after the record).
+    fn next_id(&self) -> u64 {
+        self.lock().next_id + 1
+    }
+
+    fn progress(&self, id: u64, text: String) {
+        let (record, listener) = {
+            let mut inner = self.lock();
+            let Some(record) = inner.records.iter_mut().find(|r| r.id == id) else {
+                return;
+            };
+            if record.progress.as_deref() == Some(text.as_str()) {
+                return;
+            }
+            record.progress = Some(text);
+            (record.clone(), inner.listener.clone())
+        };
+        if let Some(listener) = listener {
+            listener(&record);
+        }
+    }
+
     fn finish(&self, id: u64, duration: Duration, outcome: Outcome) {
         let (record, listener) = {
             let mut inner = self.lock();
@@ -675,6 +762,67 @@ impl CommandLog {
         if let Some(listener) = listener {
             listener(&record);
         }
+    }
+}
+
+/// A write command's `GIT_LFS_PROGRESS` file: tailed into its log record while git runs,
+/// deleted when done.
+struct LfsProgress {
+    id: u64,
+    file: PathBuf,
+}
+
+impl LfsProgress {
+    /// Write commands may move LFS objects (checkout, pull, push, clone, `lfs pull`).
+    fn for_command(cmd: &mut GitCommand, id: u64) -> Option<Self> {
+        if cmd.mode != Mode::Write {
+            return None;
+        }
+        let file = std::env::temp_dir().join(format!(
+            "gitdragon-lfs-{}-{id}.progress",
+            std::process::id()
+        ));
+        cmd.lfs_progress = Some(file.clone());
+        Some(Self { id, file })
+    }
+
+    /// Reports the newest progress line every 300 ms; never returns (race it against git).
+    async fn watch(&self, log: &CommandLog) -> std::convert::Infallible {
+        use std::io::{Read as _, Seek as _, SeekFrom};
+        let mut offset = 0u64;
+        let mut tail = String::new();
+        loop {
+            async_io::Timer::after(Duration::from_millis(300)).await;
+            let Ok(mut file) = std::fs::File::open(&self.file) else {
+                continue;
+            };
+            let mut fresh = String::new();
+            if file.seek(SeekFrom::Start(offset)).is_err()
+                || file.read_to_string(&mut fresh).is_err()
+            {
+                continue;
+            }
+            offset += fresh.len() as u64;
+            tail.push_str(&fresh);
+            // Keep only the unfinished last line; report the last complete one.
+            let complete = tail.rfind('\n').map(|end| tail[..end].to_string());
+            if let Some(done) = complete {
+                tail = tail[done.len() + 1..].to_string();
+                if let Some(text) = done
+                    .lines()
+                    .next_back()
+                    .and_then(crate::lfs::describe_progress)
+                {
+                    log.progress(self.id, text);
+                }
+            }
+        }
+    }
+}
+
+impl Drop for LfsProgress {
+    fn drop(&mut self) {
+        _ = std::fs::remove_file(&self.file);
     }
 }
 

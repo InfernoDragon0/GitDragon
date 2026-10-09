@@ -182,9 +182,19 @@ fn diffs() {
 fn log_query_and_decorations() {
     let (work, _remote) = fixture();
     let repo = block(CliRepo::open(runner(), work.path())).unwrap();
+    // `--all` leaves `refs/stash` out: only main's 3 commits.
     let all = block(repo.log(LogQuery::graph())).unwrap();
-    // 3 on main + the stash commit(s) reachable from refs/stash.
-    assert!(all.len() >= 4, "{}", all.len());
+    assert_eq!(all.len(), 3);
+    // Stashes come in as extra tips (with their helper commits, which History hides).
+    let stashes = block(repo.stashes()).unwrap();
+    assert!(!stashes.is_empty());
+    let with_stashes = block(repo.log(LogQuery {
+        stashes: stashes.iter().map(|s| s.oid.clone()).collect(),
+        ..LogQuery::graph()
+    }))
+    .unwrap();
+    assert!(with_stashes.len() >= 4, "{}", with_stashes.len());
+    assert!(with_stashes.iter().any(|c| c.id == stashes[0].oid));
     let head = &block(repo.log(LogQuery::default())).unwrap()[0];
     assert_eq!(head.subject, "third");
     assert_eq!(head.head_target.as_deref(), Some("main"));
@@ -242,4 +252,155 @@ fn log_streams_in_batches() {
     }
     assert_eq!(total, 1200);
     assert_eq!(sizes, vec![500, 500, 200]);
+}
+
+#[test]
+fn graph_history_from_a_streamed_log() {
+    use git_core::graph::History;
+    use git_core::parse::log::RefLabel;
+
+    let dir = tempfile::tempdir().unwrap();
+    let d = dir.path();
+    git(d, &["init", "-q"]);
+    write(d, "a.txt", "1\n");
+    git(d, &["add", "a.txt"]);
+    git(d, &["commit", "-q", "-m", "root"]);
+    git(d, &["checkout", "-q", "-b", "feature"]);
+    write(d, "f.txt", "f\n");
+    git(d, &["add", "f.txt"]);
+    git(
+        d,
+        &[
+            "commit",
+            "-q",
+            "-m",
+            "feature work",
+            "-m",
+            "long body is not read",
+        ],
+    );
+    git(d, &["tag", "v1"]);
+    git(d, &["checkout", "-q", "main"]);
+    write(d, "a.txt", "2\n");
+    git(d, &["commit", "-q", "-am", "main work"]);
+    git(
+        d,
+        &["merge", "-q", "--no-ff", "-m", "merge feature", "feature"],
+    );
+
+    let repo = block(CliRepo::open(runner(), d)).unwrap();
+    let mut stream = repo.log_stream(&LogQuery::graph()).unwrap();
+    let mut history = History::new();
+    while let Some(batch) = block(stream.next_batch()).unwrap() {
+        assert!(
+            batch.iter().all(|c| c.body.is_empty()),
+            "graph log skips bodies"
+        );
+        history.extend(batch);
+    }
+
+    assert_eq!(history.len(), 4);
+    assert_eq!(history.head(), Some(0));
+    assert_eq!(history.head_branch(), Some("main"));
+    let top = history.row(0).unwrap();
+    assert_eq!(top.subject, "merge feature");
+    assert_eq!(top.node.column, 0);
+    assert_eq!(top.edges.len(), 2, "merge opens a lane per parent");
+    let root = history.row(3).unwrap();
+    assert_eq!(root.subject, "root");
+    assert_eq!(root.node.column, 0);
+    let tagged = (0..4)
+        .find(|&r| {
+            history
+                .row(r)
+                .unwrap()
+                .refs
+                .contains(&RefLabel::Tag("v1".into()))
+        })
+        .unwrap();
+    assert_eq!(history.row(tagged).unwrap().subject, "feature work");
+    assert_eq!(history.row(tagged).unwrap().node.column, 1);
+    assert_eq!(history.find(top.id), Some(0));
+    assert_eq!(history.layout().width(), 2);
+}
+
+#[test]
+fn descriptions_for_visible_rows() {
+    let (work, _remote) = fixture();
+    let repo = block(CliRepo::open(runner(), work.path())).unwrap();
+    let ids: Vec<String> = block(repo.log(LogQuery::default()))
+        .unwrap()
+        .into_iter()
+        .map(|c| c.id)
+        .collect();
+    // Only "second" has a body ("body line"); the others come back without one.
+    let found = block(repo.descriptions(&ids)).unwrap();
+    assert_eq!(found, vec![(ids[1].clone(), "body line".to_string())]);
+    assert!(block(repo.descriptions(&[])).unwrap().is_empty());
+}
+
+#[test]
+fn commit_files_without_patches() {
+    let dir = tempfile::tempdir().unwrap();
+    let w = dir.path();
+    git(w, &["init", "-q"]);
+    write(w, "keep.txt", "a\nb\nc\n");
+    write(w, "gone.txt", "bye\n");
+    write(
+        w,
+        "old name.txt",
+        "same content here\nline two\nline three\n",
+    );
+    git(w, &["add", "."]);
+    git(w, &["commit", "-q", "-m", "base"]);
+    write(w, "keep.txt", "a\nB\nc\nd\n");
+    std::fs::remove_file(w.join("gone.txt")).unwrap();
+    git(w, &["mv", "old name.txt", "new name.txt"]);
+    write(w, "new.txt", "x\n");
+    std::fs::write(w.join("img.bin"), [0u8, 1, 2, 0, 255]).unwrap();
+    git(w, &["add", "-A"]);
+    git(w, &["commit", "-q", "-m", "changes"]);
+
+    let repo = block(CliRepo::open(runner(), w)).unwrap();
+    let head = String::from_utf8(git(w, &["rev-parse", "HEAD"])).unwrap();
+    let head = head.trim();
+    let files = block(repo.commit_files(head, true)).unwrap();
+    let find = |p: &str| files.iter().find(|f| f.path() == p.as_bytes()).unwrap();
+    assert_eq!(files.len(), 5, "{files:?}");
+    let keep = find("keep.txt");
+    assert_eq!(keep.change, FileChange::Modified);
+    assert_eq!((keep.added, keep.removed), (Some(2), Some(1)));
+    assert_eq!(find("gone.txt").change, FileChange::Deleted);
+    assert_eq!(find("new.txt").change, FileChange::Added);
+    let renamed = find("new name.txt");
+    assert!(matches!(renamed.change, FileChange::Renamed { .. }));
+    assert_eq!(
+        renamed.old_path.as_ref().map(|p| p.as_slice()),
+        Some(b"old name.txt".as_slice())
+    );
+    assert_eq!((renamed.added, renamed.removed), (Some(0), Some(0)));
+    assert_eq!(find("img.bin").added, None);
+
+    // The one file's diff, on demand.
+    let diff = block(repo.commit_file_diff(head, keep)).unwrap().unwrap();
+    assert_eq!(diff.hunks.len(), 1);
+    let diff = block(repo.commit_file_diff(head, renamed))
+        .unwrap()
+        .unwrap();
+    assert!(matches!(diff.change, FileChange::Renamed { .. }));
+
+    // Root commit: against the empty tree.
+    let root = String::from_utf8(git(w, &["rev-parse", "HEAD~1"])).unwrap();
+    assert_eq!(
+        block(repo.commit_files(root.trim(), true)).unwrap().len(),
+        3
+    );
+    // Without counts: the same files, no numbers.
+    let quick = block(repo.commit_files(head, false)).unwrap();
+    assert_eq!(quick.len(), 5);
+    assert!(quick.iter().all(|f| f.added.is_none()));
+    assert_eq!(
+        quick.iter().map(|f| f.path().to_vec()).collect::<Vec<_>>(),
+        files.iter().map(|f| f.path().to_vec()).collect::<Vec<_>>()
+    );
 }

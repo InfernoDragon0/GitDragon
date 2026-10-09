@@ -9,6 +9,15 @@ publish.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+accounts.workspace = true
+git-core.workspace = true
+async-trait = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+url = "2.5"
+percent-encoding = "2.3"
+# Same client stack as accounts::net (rustls, redirects off); no octocrab (decision in hosts/http.rs).
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "json", "http2"] }
 
 [lints]
 workspace = true

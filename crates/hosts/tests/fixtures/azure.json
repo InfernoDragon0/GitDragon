@@ -1,0 +1,392 @@
+[
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/_apis/connectionData?api-version=7.1-preview",
+    "body": {
+      "authenticatedUser": {
+        "id": "7a2b1c3d-0000-4000-8000-00000000aaaa",
+        "descriptor": "aad.MDAwMDAwMDAtMDAwMC00MDAwLTgwMDAtMDAwMDAwMDBhYWFh",
+        "providerDisplayName": "Inferno Dragon",
+        "isActive": true,
+        "properties": {
+          "Account": { "$type": "System.String", "$value": "inferno@example.com" }
+        }
+      },
+      "authorizedUser": { "providerDisplayName": "Inferno Dragon" },
+      "instanceId": "11111111-0000-4000-8000-000000000000",
+      "locationServiceData": { "serviceOwner": "00025394-6065-48ca-87d9-7f5672854ef7" }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/_apis/git/repositories?api-version=7.1",
+    "body": {
+      "count": 3,
+      "value": [
+        {
+          "id": "3f1c0a7e-0000-4000-8000-000000000001",
+          "name": "GitDragon",
+          "url": "https://dev.azure.com/infernodragon0/9d6a0000-0000-4000-8000-0000000000aa/_apis/git/repositories/3f1c0a7e-0000-4000-8000-000000000001",
+          "project": {
+            "id": "9d6a0000-0000-4000-8000-0000000000aa",
+            "name": "GitDragon",
+            "state": "wellFormed",
+            "visibility": "private"
+          },
+          "defaultBranch": "refs/heads/main",
+          "size": 123456,
+          "remoteUrl": "https://infernodragon0@dev.azure.com/infernodragon0/GitDragon/_git/GitDragon",
+          "sshUrl": "git@ssh.dev.azure.com:v3/infernodragon0/GitDragon/GitDragon",
+          "webUrl": "https://dev.azure.com/infernodragon0/GitDragon/_git/GitDragon",
+          "isDisabled": false,
+          "isInMaintenance": false
+        },
+        {
+          "id": "3f1c0a7e-0000-4000-8000-000000000002",
+          "name": "Open Docs",
+          "url": "https://dev.azure.com/infernodragon0/9d6a0000-0000-4000-8000-0000000000bb/_apis/git/repositories/3f1c0a7e-0000-4000-8000-000000000002",
+          "project": {
+            "id": "9d6a0000-0000-4000-8000-0000000000bb",
+            "name": "My Project",
+            "state": "wellFormed",
+            "visibility": "public"
+          },
+          "size": 0,
+          "remoteUrl": "https://infernodragon0@dev.azure.com/infernodragon0/My%20Project/_git/Open%20Docs",
+          "sshUrl": "git@ssh.dev.azure.com:v3/infernodragon0/My%20Project/Open%20Docs",
+          "webUrl": "https://dev.azure.com/infernodragon0/My%20Project/_git/Open%20Docs",
+          "isFork": true,
+          "isDisabled": false
+        },
+        {
+          "id": "3f1c0a7e-0000-4000-8000-000000000003",
+          "name": "Old Stuff",
+          "project": { "id": "9d6a0000-0000-4000-8000-0000000000aa", "name": "GitDragon" },
+          "remoteUrl": "https://infernodragon0@dev.azure.com/infernodragon0/GitDragon/_git/Old%20Stuff",
+          "isDisabled": true
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/git/repositories/GitDragon/pullrequests?searchCriteria.status=active&%24top=30&%24skip=0&api-version=7.1",
+    "body": {
+      "count": 2,
+      "value": [
+        {
+          "repository": { "id": "3f1c0a7e-0000-4000-8000-000000000001", "name": "GitDragon", "project": { "name": "GitDragon" } },
+          "pullRequestId": 42,
+          "codeReviewId": 42,
+          "status": "active",
+          "createdBy": {
+            "displayName": "Inferno Dragon",
+            "uniqueName": "inferno@example.com",
+            "id": "7a2b1c3d-0000-4000-8000-00000000aaaa",
+            "imageUrl": "https://dev.azure.com/infernodragon0/_apis/GraphProfile/MemberAvatars/aad.AAAA"
+          },
+          "creationDate": "2026-10-08T09:30:00.1234567Z",
+          "title": "Add Azure DevOps host",
+          "description": "Adds the **provider**.",
+          "sourceRefName": "refs/heads/feature/azure",
+          "targetRefName": "refs/heads/main",
+          "mergeStatus": "succeeded",
+          "isDraft": true,
+          "lastMergeSourceCommit": { "commitId": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+          "labels": [
+            { "id": "1", "name": "backend", "active": true },
+            { "id": "2", "name": "stale", "active": false }
+          ]
+        },
+        {
+          "repository": { "id": "3f1c0a7e-0000-4000-8000-000000000001", "name": "GitDragon", "project": { "name": "GitDragon" } },
+          "pullRequestId": 41,
+          "status": "active",
+          "createdBy": { "displayName": "Octo Cat", "uniqueName": "octo@example.com" },
+          "creationDate": "2026-10-07T12:00:00Z",
+          "title": "From a fork",
+          "sourceRefName": "refs/heads/fix-typo",
+          "targetRefName": "refs/heads/main",
+          "isDraft": false,
+          "lastMergeSourceCommit": { "commitId": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" },
+          "forkSource": {
+            "repository": { "id": "x", "name": "GitDragon-fork", "project": { "name": "Forks" } }
+          }
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/git/repositories/GitDragon/pullrequests?searchCriteria.status=all&%24top=30&%24skip=0&api-version=7.1",
+    "body": {
+      "count": 3,
+      "value": [
+        {
+          "pullRequestId": 42,
+          "status": "active",
+          "creationDate": "2026-10-08T09:30:00Z",
+          "title": "Add Azure DevOps host",
+          "sourceRefName": "refs/heads/feature/azure",
+          "targetRefName": "refs/heads/main"
+        },
+        {
+          "pullRequestId": 40,
+          "status": "completed",
+          "createdBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+          "creationDate": "2026-10-01T08:00:00Z",
+          "closedDate": "2026-10-02T10:15:00Z",
+          "title": "Merged work",
+          "sourceRefName": "refs/heads/done",
+          "targetRefName": "refs/heads/main",
+          "isDraft": false,
+          "lastMergeSourceCommit": { "commitId": "cccccccccccccccccccccccccccccccccccccccc" }
+        },
+        {
+          "pullRequestId": 39,
+          "status": "abandoned",
+          "creationDate": "2026-09-28T08:00:00Z",
+          "closedDate": "2026-09-29T08:00:00Z",
+          "title": "Dropped idea",
+          "sourceRefName": "refs/heads/idea",
+          "targetRefName": "refs/heads/main",
+          "isDraft": false
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/git/repositories/GitDragon/pullrequests/40?api-version=7.1",
+    "body": {
+      "pullRequestId": 40,
+      "status": "completed",
+      "createdBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+      "creationDate": "2026-10-01T08:00:00Z",
+      "closedDate": "2026-10-02T10:15:00Z",
+      "title": "Merged work",
+      "description": "",
+      "sourceRefName": "refs/heads/done",
+      "targetRefName": "refs/heads/main",
+      "isDraft": false,
+      "lastMergeSourceCommit": { "commitId": "cccccccccccccccccccccccccccccccccccccccc" }
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/git/repositories/GitDragon/pullrequests?api-version=7.1",
+    "status": 201,
+    "body": {
+      "pullRequestId": 43,
+      "status": "active",
+      "createdBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+      "creationDate": "2026-10-09T10:00:00Z",
+      "title": "New thing",
+      "description": "Body",
+      "sourceRefName": "refs/heads/new-thing",
+      "targetRefName": "refs/heads/main",
+      "isDraft": false,
+      "lastMergeSourceCommit": { "commitId": "dddddddddddddddddddddddddddddddddddddddd" }
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/wit/wiql?%24top=31&api-version=7.1",
+    "body": {
+      "queryType": "flat",
+      "queryResultType": "workItem",
+      "asOf": "2026-10-09T10:00:00.5Z",
+      "columns": [{ "referenceName": "System.Id", "name": "ID", "url": "https://dev.azure.com/infernodragon0/_apis/wit/fields/System.Id" }],
+      "workItems": [
+        { "id": 12, "url": "https://dev.azure.com/infernodragon0/_apis/wit/workItems/12" },
+        { "id": 11, "url": "https://dev.azure.com/infernodragon0/_apis/wit/workItems/11" }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/_apis/wit/workitems?ids=12%2C11&fields=System.Id%2CSystem.Title%2CSystem.State%2CSystem.CreatedBy%2CSystem.AssignedTo%2CSystem.Tags%2CSystem.CreatedDate%2CSystem.ChangedDate%2CSystem.CommentCount%2CSystem.Description&api-version=7.1",
+    "body": {
+      "count": 2,
+      "value": [
+        {
+          "id": 11,
+          "rev": 3,
+          "fields": {
+            "System.Id": 11,
+            "System.Title": "Crash on open",
+            "System.State": "Active",
+            "System.CreatedBy": {
+              "displayName": "Octo Cat",
+              "uniqueName": "octo@example.com",
+              "imageUrl": "https://dev.azure.com/infernodragon0/_apis/GraphProfile/MemberAvatars/aad.BBBB"
+            },
+            "System.CreatedDate": "2026-10-05T08:00:00Z",
+            "System.ChangedDate": "2026-10-06T08:00:00Z",
+            "System.CommentCount": 0
+          },
+          "url": "https://dev.azure.com/infernodragon0/_apis/wit/workItems/11"
+        },
+        {
+          "id": 12,
+          "rev": 5,
+          "fields": {
+            "System.Id": 12,
+            "System.Title": "Slow graph",
+            "System.State": "Resolved",
+            "System.CreatedBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+            "System.AssignedTo": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+            "System.Tags": "perf; ui ;  ",
+            "System.CreatedDate": "2026-10-04T08:00:00Z",
+            "System.ChangedDate": "2026-10-08T08:00:00Z",
+            "System.CommentCount": 3,
+            "System.Description": "<div>Scrolling lags.</div>"
+          },
+          "url": "https://dev.azure.com/infernodragon0/_apis/wit/workItems/12"
+        }
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/wit/workitems/$Issue?api-version=7.1",
+    "body": {
+      "id": 13,
+      "rev": 1,
+      "fields": {
+        "System.Id": 13,
+        "System.WorkItemType": "Issue",
+        "System.Title": "Crash on open",
+        "System.State": "To Do",
+        "System.CreatedBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+        "System.CreatedDate": "2026-10-09T10:05:00Z",
+        "System.ChangedDate": "2026-10-09T10:05:00Z",
+        "System.Tags": "bug; crash",
+        "System.Description": "Steps"
+      },
+      "url": "https://dev.azure.com/infernodragon0/_apis/wit/workItems/13"
+    }
+  },
+  {
+    "method": "POST",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/wit/workItems/12/comments?api-version=7.1-preview.4",
+    "body": {
+      "id": 9001,
+      "workItemId": 12,
+      "text": "On it",
+      "createdBy": { "displayName": "Inferno Dragon", "uniqueName": "inferno@example.com" },
+      "createdDate": "2026-10-09T10:10:00Z"
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/git/repositories/GitDragon?api-version=7.1",
+    "body": {
+      "id": "3f1c0a7e-0000-4000-8000-000000000001",
+      "name": "GitDragon",
+      "project": { "id": "9d6a0000-0000-4000-8000-0000000000aa", "name": "GitDragon" }
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/build/builds?repositoryId=3f1c0a7e-0000-4000-8000-000000000001&repositoryType=TfsGit&branchName=refs%2Fheads%2Fmain&%24top=25&queryOrder=queueTimeDescending&api-version=7.1",
+    "body": {
+      "count": 3,
+      "value": [
+        {
+          "id": 502,
+          "buildNumber": "20261009.2",
+          "status": "completed",
+          "result": "succeeded",
+          "sourceBranch": "refs/heads/main",
+          "sourceVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "definition": { "id": 7, "name": "CI" },
+          "_links": { "web": { "href": "https://dev.azure.com/infernodragon0/9d6a0000/_build/results?buildId=502" } }
+        },
+        {
+          "id": 501,
+          "buildNumber": "20261009.1",
+          "status": "inProgress",
+          "sourceBranch": "refs/heads/main",
+          "sourceVersion": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "definition": { "id": 8, "name": "Docs" },
+          "_links": { "web": { "href": "https://dev.azure.com/infernodragon0/9d6a0000/_build/results?buildId=501" } }
+        },
+        {
+          "id": 480,
+          "buildNumber": "20261008.4",
+          "status": "completed",
+          "result": "failed",
+          "sourceBranch": "refs/heads/main",
+          "sourceVersion": "9999999999999999999999999999999999999999",
+          "definition": { "id": 7, "name": "CI" },
+          "_links": { "web": { "href": "https://dev.azure.com/infernodragon0/9d6a0000/_build/results?buildId=480" } }
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/build/builds?repositoryId=3f1c0a7e-0000-4000-8000-000000000001&repositoryType=TfsGit&branchName=refs%2Fheads%2Fbroken&%24top=25&queryOrder=queueTimeDescending&api-version=7.1",
+    "body": {
+      "count": 2,
+      "value": [
+        {
+          "id": 510,
+          "buildNumber": "20261009.5",
+          "status": "completed",
+          "result": "failed",
+          "sourceVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "definition": { "id": 7, "name": "CI" },
+          "_links": { "web": { "href": "https://dev.azure.com/infernodragon0/9d6a0000/_build/results?buildId=510" } }
+        },
+        {
+          "id": 509,
+          "buildNumber": "20261009.4",
+          "status": "completed",
+          "result": "canceled",
+          "sourceVersion": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee",
+          "definition": { "id": 9, "name": "Lint" }
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/build/builds?repositoryId=3f1c0a7e-0000-4000-8000-000000000001&repositoryType=TfsGit&branchName=refs%2Fheads%2Fnone&%24top=25&queryOrder=queueTimeDescending&api-version=7.1",
+    "body": { "count": 0, "value": [] }
+  },
+  {
+    "method": "GET",
+    "url": "https://dev.azure.com/infernodragon0/GitDragon/_apis/build/builds?repositoryId=3f1c0a7e-0000-4000-8000-000000000001&repositoryType=TfsGit&%24top=25&queryOrder=queueTimeDescending&api-version=7.1",
+    "body": {
+      "count": 3,
+      "value": [
+        {
+          "id": 502,
+          "buildNumber": "20261009.2",
+          "status": "completed",
+          "result": "partiallySucceeded",
+          "sourceVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "definition": { "id": 7, "name": "CI" }
+        },
+        {
+          "id": 501,
+          "buildNumber": "20261009.1",
+          "status": "completed",
+          "result": "failed",
+          "sourceVersion": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "definition": { "id": 8, "name": "Docs" }
+        },
+        {
+          "id": 400,
+          "buildNumber": "20261001.1",
+          "status": "completed",
+          "result": "succeeded",
+          "sourceVersion": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "definition": { "id": 7, "name": "CI" }
+        }
+      ]
+    }
+  }
+]
