@@ -1,0 +1,27 @@
+[package]
+name = "git-core"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+
+[features]
+# Optional read-only fast path (design: "Git backend: CLI first"). Stub until a GixRepo exists.
+gix = []
+
+[dependencies]
+async-io = "2.6"
+async-process = "2.5"
+bstr = "1.13"
+futures-lite = "2.6"
+memchr = "2.7"
+notify = "8.2"
+notify-debouncer-full = { version = "0.7", default-features = false }
+thiserror.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

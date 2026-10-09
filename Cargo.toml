@@ -1,0 +1,42 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/app"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.99"
+publish = false
+
+[workspace.dependencies]
+# UI: gpui-kit pins a matching GPUI (gpui-pre) + gpui-component; upgrade deliberately.
+gpui-kit = "=0.7.1"
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+
+ui = { path = "crates/ui" }
+git-core = { path = "crates/git-core" }
+hosts = { path = "crates/hosts" }
+accounts = { path = "crates/accounts" }
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+dbg_macro = "warn"
+todo = "warn"
+
+[profile.dev]
+# GPUI is slow unoptimised; keep our crates debuggable and deps fast.
+[profile.dev.package."*"]
+opt-level = 2
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+debug = "line-tables-only"
