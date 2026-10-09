@@ -188,7 +188,7 @@ impl CliRepo {
         validate_repo_path(path)?;
         let cmd = GitCommand::read(self.root())
             .args(["diff", "--no-index"])
-            .args(diff::ARGS)
+            .args(diff::args(false))
             .paths([b"/dev/null".as_slice(), path.as_slice()]);
         let display = cmd.display();
         let out = self.runner().output(cmd).await?;

@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GitDragon
+GenericName=Git Client
+Comment=A fast, native Git client
+Exec=gitdragon
+Icon=gitdragon
+Terminal=false
+Categories=Development;RevisionControl;
+Keywords=git;version control;
+StartupWMClass=gitdragon

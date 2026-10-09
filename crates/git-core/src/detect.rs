@@ -150,7 +150,7 @@ fn candidates() -> Vec<PathBuf> {
 }
 
 /// `PATH` entries that are absolute; `.`, empty and relative entries are dropped.
-pub(crate) fn absolute_path_dirs(path: Option<OsString>) -> Vec<PathBuf> {
+pub fn absolute_path_dirs(path: Option<OsString>) -> Vec<PathBuf> {
     path.map(|p| {
         std::env::split_paths(&p)
             .filter(|dir| dir.is_absolute())

@@ -273,5 +273,25 @@
     "url": "https://gitlab.com/api/v4/projects/group%2Fsub%2Fproj/pipelines/101/jobs?per_page=100",
     "status": 403,
     "body": { "message": "403 Forbidden" }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/avatar?email=me%40example.com&size=64",
+    "body": { "avatar_url": "https://secure.gravatar.com/avatar/abc123?s=64&d=identicon" }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/avatar?email=nobody%40example.com&size=64",
+    "body": { "avatar_url": null }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/avatar?email=empty%40example.com&size=64",
+    "body": { "avatar_url": "" }
+  },
+  {
+    "method": "GET",
+    "url": "https://gitlab.com/api/v4/avatar?email=plain%40example.com&size=64",
+    "body": { "avatar_url": "http://gitlab.internal/uploads/-/system/user/avatar/2/avatar.png" }
   }
 ]

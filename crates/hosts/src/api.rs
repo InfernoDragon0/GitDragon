@@ -133,10 +133,18 @@ impl ApiClient {
 
     /// Drops cached answers at or below `segments` (e.g. `["repos", owner, repo]`).
     pub fn invalidate(&self, segments: &[&str]) {
-        let prefix = self.url(segments, &[]).to_string();
+        self.invalidate_url(&self.url(segments, &[]));
+    }
+
+    /// Drops cached answers at or below `url` (also cached POSTs to it, see
+    /// [`Self::post_cached`]); for endpoints outside the API base (GHES GraphQL).
+    pub fn invalidate_url(&self, url: &Url) {
+        let prefix = url.to_string();
         lock(&self.cache).retain(|key, _| {
             let rest = key.strip_prefix(&prefix);
-            !rest.is_some_and(|r| r.is_empty() || r.starts_with('/') || r.starts_with('?'))
+            !rest.is_some_and(|r| {
+                r.is_empty() || r.starts_with('/') || r.starts_with('?') || r.starts_with('#')
+            })
         });
     }
 
@@ -228,6 +236,45 @@ impl ApiClient {
                 Ok(answer)
             }
             _ => Err(self.error(&response)),
+        }
+    }
+
+    /// A read-only POST (GraphQL query, Azure WIQL) cached by URL and body for the TTL. No
+    /// revalidation: these endpoints send no ETag. While rate limited the cached answer is
+    /// served stale, like [`Self::get`].
+    pub async fn post_cached(&self, url: Url, body: &Value) -> Result<Fetched, HostError> {
+        let key = format!("{url}#post:{body}");
+        let cached = lock(&self.cache).get(&key).cloned();
+        if let Some(entry) = &cached
+            && entry.fetched.elapsed() < self.ttl
+        {
+            return Ok(entry.answer(false));
+        }
+        if let Some(until) = self.rate_limit().blocked(SystemTime::now()) {
+            return match &cached {
+                Some(entry) => Ok(entry.answer(true)),
+                None => Err(self.rate_limited(until)),
+            };
+        }
+        match self.send_json(Method::Post, url, body).await {
+            Ok(answer) => {
+                let entry = Entry {
+                    fetched: Instant::now(),
+                    etag: None,
+                    last_modified: None,
+                    next_page: false,
+                    body: answer.into(),
+                };
+                let fetched = entry.answer(false);
+                lock(&self.cache).insert(key, entry);
+                Ok(fetched)
+            }
+            Err(err @ (HostError::Network { .. } | HostError::RateLimited { .. })) => match &cached
+            {
+                Some(entry) => Ok(entry.answer(true)),
+                None => Err(err),
+            },
+            Err(err) => Err(err),
         }
     }
 

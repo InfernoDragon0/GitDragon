@@ -84,3 +84,19 @@ Where the time goes (raw `git log --all --topo-order -z`, output to NUL, commit-
 - No faster than with the editor open (full load ~1.5 s slower, within noise): the editor sat idle,
   and source files were being edited during this run, so rust-analyzer may have been busy. The load
   is git-bound either way; an idle editor costs GitDragon nothing measurable.
+
+### 2026-10-09 · release-candidate check (packaging pass) · git 2.40.1.windows.1 · same machine, normal desktop load
+
+`graph_bench --runs 3 --skip-cold` on the existing linux clone (commit-graph present, 1,484,916 commits) and on this repo.
+
+| Repo | Date-order preview | First rows (topo) | Full load | Viewport (60 rows) | Peak working set |
+|---|---|---|---|---|---|
+| linux (1.48M) | 78 ms (200 rows; 1.2 s on the very first, cold-cache run) | 1.1 / 1.1 / 1.4 s | 18.2 / 18.3 / 20.0 s | 2.5 us | 262 MiB |
+| GitDragon (3 commits) | 28 ms | 24-28 ms | 24-28 ms | 0.1 us | 6 MiB |
+
+- **Repo open (< 500 ms): met for normal repositories** (graph first rows ~25 ms here). On the kernel the date-order preview
+  paints in ~80 ms but the topo-ordered graph still takes ~1.1 s (git's own `--topo-order` latency, unchanged and known).
+  `git status --porcelain=v2 --branch --show-stash` on the kernel working tree is 0.8 s warm, also git-bound.
+- **Graph 60 fps on 1M+ commits**: the data side is far inside the frame budget (2.5 us per viewport query vs 16 ms). The
+  rendering side (295 spans per window) still needs a hands-on check in the real view; not driven here.
+- Full load is a little slower than the earlier 15-17 s runs (18-20 s); same git-bound path, machine was busier. No code change.

@@ -173,12 +173,13 @@ fn read_number(path: &Path) -> Option<u32> {
 /// What the git dir says is in progress.
 pub fn detect(git_dir: &Path) -> Option<InProgress> {
     let head = |name: &str| read_trimmed(&git_dir.join(name));
-    let merge_message = || {
-        head("MERGE_MSG").and_then(|m| m.lines().next().map(str::to_owned))
-    };
-    let rebase = [("rebase-merge", "msgnum", "end"), ("rebase-apply", "next", "last")]
-        .into_iter()
-        .find(|(dir, ..)| git_dir.join(dir).is_dir());
+    let merge_message = || head("MERGE_MSG").and_then(|m| m.lines().next().map(str::to_owned));
+    let rebase = [
+        ("rebase-merge", "msgnum", "end"),
+        ("rebase-apply", "next", "last"),
+    ]
+    .into_iter()
+    .find(|(dir, ..)| git_dir.join(dir).is_dir());
     if let Some((dir, current, total)) = rebase {
         let dir = git_dir.join(dir);
         if dir.join("applying").exists() {
@@ -193,7 +194,11 @@ pub fn detect(git_dir: &Path) -> Option<InProgress> {
         }
         let branch = read_trimmed(&dir.join("head-name"))
             .filter(|b| b != "detached HEAD")
-            .map(|b| b.strip_prefix("refs/heads/").map(str::to_owned).unwrap_or(b));
+            .map(|b| {
+                b.strip_prefix("refs/heads/")
+                    .map(str::to_owned)
+                    .unwrap_or(b)
+            });
         return Some(InProgress {
             op: Operation::Rebase,
             branch,
@@ -259,12 +264,16 @@ impl CliRepo {
             MergeMode::FastForwardOnly => cmd.arg("--ff-only"),
             MergeMode::Squash => cmd.arg("--squash"),
         };
-        self.run_may_stop(cmd.arg("--end-of-options").rev(rev)?).await
+        self.run_may_stop(cmd.arg("--end-of-options").rev(rev)?)
+            .await
     }
 
     /// Rebases the current branch onto `onto`.
     pub async fn rebase(&self, onto: &str) -> Result<()> {
-        let cmd = self.op_cmd().args(["rebase", "--end-of-options"]).rev(onto)?;
+        let cmd = self
+            .op_cmd()
+            .args(["rebase", "--end-of-options"])
+            .rev(onto)?;
         self.run_may_stop(cmd).await
     }
 
@@ -277,7 +286,12 @@ impl CliRepo {
         };
         let read = || GitCommand::read(self.root());
         let log = read()
-            .args(["log", "--reverse", "--no-merges", "--format=%H%x1f%s%x1f%B%x1e"])
+            .args([
+                "log",
+                "--reverse",
+                "--no-merges",
+                "--format=%H%x1f%s%x1f%B%x1e",
+            ])
             .arg("--end-of-options")
             .rev(&range)?
             .paths::<_, &[u8]>([]);
@@ -402,7 +416,9 @@ impl CliRepo {
             };
             write().args(["checkout", flag]).paths([path])
         } else {
-            write().args(["rm", "--quiet", "--ignore-unmatch"]).paths([path])
+            write()
+                .args(["rm", "--quiet", "--ignore-unmatch"])
+                .paths([path])
         };
         self.runner().run(cmd).await?;
         if present {
@@ -431,7 +447,11 @@ mod tests {
         assert_eq!(detect(git), None);
 
         std::fs::write(git.join("MERGE_HEAD"), "abc123\n").unwrap();
-        std::fs::write(git.join("MERGE_MSG"), "Merge branch 'feature'\n\n# Conflicts:\n").unwrap();
+        std::fs::write(
+            git.join("MERGE_MSG"),
+            "Merge branch 'feature'\n\n# Conflicts:\n",
+        )
+        .unwrap();
         let merge = detect(git).unwrap();
         assert_eq!(merge.op, Operation::Merge);
         assert_eq!(merge.incoming.as_deref(), Some("abc123"));

@@ -1,0 +1,21 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.6.0.schema.json
+PackageIdentifier: InfernoDragon0.GitDragon
+PackageVersion: <VERSION>
+MinimumOSVersion: 10.0.0.0
+InstallerType: inno
+Scope: user
+InstallModes:
+  - interactive
+  - silent
+  - silentWithProgress
+UpgradeBehavior: install
+ReleaseDate: <YYYY-MM-DD>
+Dependencies:
+  PackageDependencies:
+    - PackageIdentifier: Git.Git
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/InfernoDragon0/GitDragon/releases/download/v<VERSION>/GitDragon-<VERSION>-windows-x64-setup.exe
+    InstallerSha256: <SHA256_OF_SETUP_EXE>
+ManifestType: installer
+ManifestVersion: 1.6.0

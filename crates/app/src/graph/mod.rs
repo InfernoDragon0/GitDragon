@@ -1,10 +1,11 @@
 //! The Graph view: every ref's history as a lane graph (git-core `graph::History`), streamed
 //! in batches so the first rows show while `git log` is still walking. Reloads when refs or
-//! HEAD move; selection is kept by commit id across reloads.
+//! HEAD move; selection is kept by commit id across reloads. A clicked file of the details
+//! panel opens in place of the graph: read-only for a commit, the staging diff for the WIP row.
 
 mod actions;
 mod details;
-mod format;
+pub(crate) mod format;
 mod lanes;
 pub mod link;
 mod names;
@@ -38,6 +39,7 @@ use gpui_kit::{
 use ui::diff::{self as diff_ui, DiffModel, Layout};
 use ui::{Palette, zoomed};
 
+use crate::changes::diff::{StagingDiff, StagingDiffEvent};
 use crate::drag_scroll::DragScroll;
 use crate::repo_tab::RepoTab;
 use link::{GraphLink, LinkEvent};
@@ -145,6 +147,9 @@ pub struct GraphView {
     tab: Entity<RepoTab>,
     link: Entity<GraphLink>,
     file: Option<OpenFile>,
+    /// The WIP row's file being staged, shown instead of `file` while `staging_open`.
+    staging: Entity<StagingDiff>,
+    staging_open: bool,
     diff_layout: Layout,
     diff_scroll: UniformListScrollHandle,
     search_input: Entity<InputState>,
@@ -186,7 +191,14 @@ impl GraphView {
         let search_input = cx.new(|cx| {
             InputState::new(window, cx).placeholder("Search: text, author:, hash:, path:")
         });
+        let staging = cx.new(|cx| StagingDiff::new(tab.clone(), cx));
         let _subs = vec![
+            cx.subscribe(
+                &staging,
+                |this, _, event: &StagingDiffEvent, cx| match event {
+                    StagingDiffEvent::Close => this.close_file(cx),
+                },
+            ),
             cx.subscribe(
                 &search_input,
                 |this, _, event: &InputEvent, cx| match event {
@@ -208,6 +220,8 @@ impl GraphView {
             tab,
             link,
             file: None,
+            staging,
+            staging_open: false,
             diff_layout: Layout::Unified,
             diff_scroll: UniformListScrollHandle::new(),
             search_input,
@@ -724,16 +738,28 @@ impl GraphView {
             && self.history.wip_id().is_none();
         if stale {
             self.selected = None;
-            self.file = None;
+            self.drop_file(cx);
             self.publish_selection(cx);
         }
     }
 
     fn select(&mut self, row: usize, cx: &mut Context<Self>) {
         self.selected = self.history.id(row).map(str::to_owned);
-        self.file = None;
+        self.drop_file(cx);
         self.publish_selection(cx);
         cx.notify();
+    }
+
+    /// Selects (and scrolls to) the WIP row, where the commit box and staging live. Nothing
+    /// happens on a clean worktree (no WIP row).
+    pub fn select_wip(&mut self, cx: &mut Context<Self>) {
+        let Some(row) = self.history.wip_id().and_then(|id| self.history.find(id)) else {
+            return;
+        };
+        if self.selected_row() != Some(row) {
+            self.select(row, cx);
+        }
+        self.scroll.scroll_to_item(row, ScrollStrategy::Center);
     }
 
     /// Tells the details panel which commit this tab has selected (also called when the tab
@@ -750,6 +776,16 @@ impl GraphView {
             LinkEvent::ShowFile { tab, commit, file } if *tab == self.tab.downgrade() => {
                 if self.selected.as_deref() == Some(commit.as_str()) {
                     self.show_file(file.clone(), cx);
+                }
+            }
+            LinkEvent::ShowWorkingFile { tab, section, path } if *tab == self.tab.downgrade() => {
+                if self.selected.as_deref().is_some_and(details::is_wip_id) {
+                    self.file = None;
+                    self.staging_open = true;
+                    let (section, path) = (*section, path.clone());
+                    self.staging
+                        .update(cx, |staging, cx| staging.open(section, path, cx));
+                    cx.notify();
                 }
             }
             LinkEvent::Select { tab, commit } if *tab == self.tab.downgrade() => {
@@ -782,6 +818,7 @@ impl GraphView {
                 cx.notify();
             });
         });
+        self.drop_file(cx);
         self.file = Some(OpenFile {
             path: path.into(),
             model: None,
@@ -791,12 +828,22 @@ impl GraphView {
         cx.notify();
     }
 
+    /// Back to the graph; the details panel drops its file highlight.
     fn close_file(&mut self, cx: &mut Context<Self>) {
-        if self.file.take().is_some() {
+        if self.drop_file(cx) {
             self.link
                 .update(cx, |link, cx| link.set_open_file(None, cx));
             cx.notify();
         }
+    }
+
+    /// Forgets the open file (commit or WIP); true when one was open.
+    fn drop_file(&mut self, cx: &mut Context<Self>) -> bool {
+        let staging = std::mem::take(&mut self.staging_open);
+        if staging {
+            self.staging.update(cx, |staging, cx| staging.close(cx));
+        }
+        self.file.take().is_some() || staging
     }
 
     fn render_file(&self, palette: &Palette, cx: &mut Context<Self>) -> Option<AnyElement> {
@@ -1291,6 +1338,13 @@ impl Focusable for GraphView {
 impl Render for GraphView {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(cx);
+        if self.staging_open {
+            return div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(self.staging.clone())
+                .into_any_element();
+        }
         if let Some(file) = self.render_file(&palette, cx) {
             return file;
         }
@@ -1305,17 +1359,32 @@ impl Render for GraphView {
                 .clone()
                 .or_else(|| self.tab.read(cx).error.clone());
             let text = match (error, loading) {
-                (Some(err), _) => err,
-                (None, true) => "Loading history…".into(),
-                (None, false) => "No commits yet.".into(),
+                (Some(err), _) => Some(err),
+                (None, true) => Some("Loading history…".into()),
+                (None, false) => None,
             };
-            div()
-                .flex_1()
-                .p_4()
-                .text_sm()
-                .text_color(palette.muted)
-                .child(text)
-                .into_any_element()
+            match text {
+                Some(text) => div()
+                    .flex_1()
+                    .p_4()
+                    .text_sm()
+                    .text_color(palette.muted)
+                    .child(text)
+                    .into_any_element(),
+                None => div()
+                    .flex_1()
+                    .child(
+                        crate::empty::EmptyState::new(
+                            gpui_kit::assets::IconName::GitGraph,
+                            "No commits yet",
+                            "The first commit shows up here. Stage your files and write a message in Changes.",
+                        )
+                        .action("Open changes", |_, window, cx| {
+                            window.dispatch_action(Box::new(crate::actions::ShowChanges), cx)
+                        }),
+                    )
+                    .into_any_element(),
+            }
         } else {
             div()
                 .id("graph-body")

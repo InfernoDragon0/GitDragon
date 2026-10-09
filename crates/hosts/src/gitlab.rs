@@ -12,11 +12,16 @@ use serde_json::{Map, Value, json};
 use url::Url;
 
 use crate::api::{ApiClient, RateLimit};
+use crate::boards::{Board, BoardColumn, BoardItem, BoardPage};
 use crate::error::HostError;
 use crate::host::{GitHost, HostResult};
 use crate::http::{Auth, Method, Transport};
 use crate::model::*;
 use crate::remote::RepoId;
+
+/// Issue boards.
+#[path = "boards/gl.rs"]
+mod boards;
 
 pub struct GitLab {
     api: ApiClient,
@@ -168,7 +173,10 @@ impl GitHost for GitLab {
                 | Feature::Issues
                 | Feature::CreateIssue
                 | Feature::IssueComments
+                | Feature::CloseIssue
                 | Feature::CiStatus
+                | Feature::Avatars
+                | Feature::Boards
         )
     }
 
@@ -199,13 +207,21 @@ impl GitHost for GitLab {
         Some(url.to_string())
     }
 
+    fn pull_head_ref(&self, number: u64) -> Option<String> {
+        Some(format!("merge-requests/{number}/head"))
+    }
+
     fn rate_limit(&self) -> RateLimit {
         self.api.rate_limit()
     }
 
     fn invalidate(&self, repo: Option<&RepoId>) {
         match repo {
-            Some(repo) => self.api.invalidate(&["projects", &project_path(repo)]),
+            Some(repo) => {
+                self.api.invalidate(&["projects", &project_path(repo)]);
+                // Group boards and their issues.
+                self.api.invalidate(&["groups", &repo.owner]);
+            }
             None => self.api.clear_cache(),
         }
     }
@@ -359,6 +375,18 @@ impl GitHost for GitLab {
         })
     }
 
+    async fn set_issue_state(&self, repo: &RepoId, number: u64, open: bool) -> HostResult<Issue> {
+        let n = number.to_string();
+        let url = self.project_url(repo, &["issues", &n], &[]);
+        let event = if open { "reopen" } else { "close" };
+        let answer = self
+            .api
+            .send_json(Method::Put, url, &json!({ "state_event": event }))
+            .await?;
+        self.invalidate(Some(repo));
+        Ok(self.api.decode::<GlIssue>(&answer)?.into())
+    }
+
     /// The latest pipeline for a branch / tag / sha, one check per job. Without the permission
     /// to list jobs the pipeline's own status is the single check.
     async fn ci_status(&self, repo: &RepoId, reference: &str) -> HostResult<CiStatus> {
@@ -397,6 +425,57 @@ impl GitHost for GitLab {
         };
         Ok(CiStatus::from_checks(checks))
     }
+
+    /// GitLab's own answer for `email` (`GET /avatar`; `commit` is not needed): the matching
+    /// user's avatar, else a Gravatar URL. A non-https URL is dropped: avatars are fetched
+    /// over HTTPS only.
+    async fn author_avatar(
+        &self,
+        _repo: &RepoId,
+        _commit: &str,
+        email: &str,
+    ) -> HostResult<Option<String>> {
+        let url = self
+            .api
+            .url(&["avatar"], &[("email", email), ("size", "64")]);
+        let fetched = self.api.get(url).await?;
+        let found: GlAvatar = self.api.decode(&fetched.body)?;
+        Ok(found
+            .avatar_url
+            .filter(|url| url.starts_with("https://") && url.len() > "https://".len()))
+    }
+
+    async fn boards(&self, repo: &RepoId) -> HostResult<Vec<Board>> {
+        boards::boards(self, repo).await
+    }
+
+    async fn board(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        cursor: Option<&str>,
+    ) -> HostResult<BoardPage> {
+        boards::board(self, board, cursor).await
+    }
+
+    async fn move_board_item(
+        &self,
+        repo: &RepoId,
+        board: &Board,
+        item: &BoardItem,
+        to: &BoardColumn,
+    ) -> HostResult<BoardItem> {
+        boards::move_item(self, repo, board, item, to).await
+    }
+
+    async fn board_item(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        item: &BoardItem,
+    ) -> HostResult<BoardItem> {
+        boards::item_detail(self, board, item).await
+    }
 }
 
 // GitLab's JSON, only the fields we use.
@@ -421,6 +500,13 @@ impl From<GlUser> for Person {
             web_url: u.web_url,
         }
     }
+}
+
+/// `GET /avatar?email=`.
+#[derive(Deserialize)]
+struct GlAvatar {
+    #[serde(default)]
+    avatar_url: Option<String>,
 }
 
 #[derive(Deserialize)]

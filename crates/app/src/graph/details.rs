@@ -1,8 +1,10 @@
 //! Details panel (right dock): the selected commit's message, people, ids, refs and changed
 //! files. Clicking a file opens its diff in the centre; clicking a parent selects it.
 //!
-//! The graph's WIP row shows the staged and unstaged files instead (stage / unstage per file,
-//! diff on click), and a stash row adds apply / pop / drop.
+//! The graph's WIP row shows the working copy instead: the tab's commit box at the top, then
+//! stash / pop, a filter, and the conflicted / staged / unstaged / untracked files with stage,
+//! unstage, discard and LFS lock actions; clicking one opens its staging diff in the centre.
+//! A stash row adds apply / pop / drop.
 
 use std::sync::Arc;
 
@@ -10,23 +12,26 @@ use bstr::BString;
 use bstr::ByteSlice as _;
 use git_core::parse::diff::{FileChange, FileDiff, LineKind};
 use git_core::parse::log::Commit;
-use git_core::parse::status::EntryKind;
+use git_core::parse::status::{EntryKind, StatusEntry};
 use git_core::{DiffTarget, GitRepo as _, LogQuery, StashAction};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
+use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ClickEvent, ClipboardItem, Context, ElementId, Entity, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _, Render,
-    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
-    Window, div, prelude::FluentBuilder as _,
+    AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, ElementId, Entity,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement as _, IntoElement, ParentElement as _,
+    Render, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    WeakEntity, Window, div, prelude::FluentBuilder as _,
 };
 use ui::{Palette, zoomed};
 
 use super::format;
 use super::link::{GraphLink, LinkEvent};
+use crate::changes::commit_box::CommitBox;
+use crate::changes::{self, Section};
 use crate::repo_tab::RepoTab;
 
 /// Commits kept loaded for going back to them.
@@ -39,17 +44,11 @@ const FILE_LIMIT: usize = 300;
 /// Path -> (added, removed) from `--numstat`; `None` counts for binary files.
 type LineCounts = std::collections::HashMap<Vec<u8>, (Option<u32>, Option<u32>)>;
 
-/// Where a listed file's diff comes from.
-enum Source {
-    /// Already read (the WIP lists read whole diffs).
-    Diff(Arc<FileDiff>),
-    /// A commit's file: its diff is read when opened.
-    Commit(Arc<git_core::ChangedFile>),
-}
-
 /// A changed file with its line counts.
 struct FileEntry {
-    source: Source,
+    /// A commit's file, whose diff is read when opened (`None` for the WIP lists, which open
+    /// the staging diff instead).
+    source: Option<Arc<git_core::ChangedFile>>,
     change: FileChange,
     path: String,
     added: usize,
@@ -75,8 +74,10 @@ struct Loaded {
 struct WipLoaded {
     staged: Vec<FileEntry>,
     unstaged: Vec<FileEntry>,
-    /// Untracked paths; their diff is built when clicked.
+    /// Untracked paths (no diff until opened).
     untracked: Vec<String>,
+    /// Unmerged paths (resolved in the Conflicts view, marked resolved by staging).
+    conflicted: Vec<String>,
 }
 
 enum State {
@@ -108,6 +109,10 @@ pub struct DetailsPanel {
     /// While the WIP row is shown: reloads it when the tab's status changes.
     tab_sub: Option<Subscription>,
     wip_generation: u64,
+    /// One commit box per repository tab, so drafts survive switching rows and tabs.
+    commit_boxes: Vec<(WeakEntity<RepoTab>, Entity<CommitBox>)>,
+    /// Filters the WIP file lists; made on first render (it needs the window).
+    filter: Option<(Entity<InputState>, Subscription)>,
     focus: FocusHandle,
     _subs: Vec<Subscription>,
 }
@@ -126,6 +131,8 @@ impl DetailsPanel {
             show_all: false,
             tab_sub: None,
             wip_generation: 0,
+            commit_boxes: Vec::new(),
+            filter: None,
             focus: cx.focus_handle(),
             _subs,
         }
@@ -151,6 +158,9 @@ impl DetailsPanel {
                 self.tab_sub = Some(cx.observe(&tab, |this, tab, cx| {
                     if tab.read(cx).generation != this.wip_generation {
                         this.load_wip(cx);
+                    } else {
+                        // Busy state changed: the WIP buttons enable / disable.
+                        cx.notify();
                     }
                 }));
             }
@@ -263,7 +273,7 @@ impl DetailsPanel {
                             counted: counts.is_some(),
                             lfs: None,
                             lfs_tracked: tracked.get(f.path()).is_some_and(|a| a.lfs),
-                            source: Source::Commit(Arc::new(f.clone())),
+                            source: Some(Arc::new(f.clone())),
                         }
                     })
                     .collect::<Vec<_>>()
@@ -365,22 +375,44 @@ impl DetailsPanel {
             return;
         };
         self.wip_generation = tab.generation;
-        let untracked: Vec<String> = tab
-            .status
+        let paths = |kind: EntryKind| -> Vec<String> {
+            tab.status
+                .iter()
+                .flat_map(|s| &s.entries)
+                .filter(|e| e.kind == kind)
+                .map(|e| e.path.to_str_lossy().into_owned())
+                .collect()
+        };
+        let untracked = paths(EntryKind::Untracked);
+        let conflicted = paths(EntryKind::Unmerged);
+        let lfs: std::collections::HashSet<String> = tab
+            .lfs_attrs
             .iter()
-            .flat_map(|s| &s.entries)
-            .filter(|e| matches!(e.kind, EntryKind::Untracked))
-            .map(|e| e.path.to_str_lossy().into_owned())
+            .filter(|(_, attrs)| attrs.lfs)
+            .map(|(path, _)| path.to_str_lossy().into_owned())
             .collect();
         let job = cx.background_executor().spawn(async move {
             let staged = repo.diff(DiffTarget::Staged { paths: Vec::new() }).await?;
             let unstaged = repo
                 .diff(DiffTarget::Unstaged { paths: Vec::new() })
                 .await?;
+            let entries = |files: Vec<FileDiff>| -> Vec<FileEntry> {
+                files
+                    .into_iter()
+                    .map(file_entry)
+                    // Conflicted files are listed on their own.
+                    .filter(|f| !conflicted.contains(&f.path))
+                    .map(|mut f| {
+                        f.lfs_tracked = lfs.contains(&f.path);
+                        f
+                    })
+                    .collect()
+            };
             Ok::<_, git_core::GitError>(WipLoaded {
-                staged: staged.into_iter().map(file_entry).collect(),
-                unstaged: unstaged.into_iter().map(file_entry).collect(),
+                staged: entries(staged),
+                unstaged: entries(unstaged),
                 untracked,
+                conflicted,
             })
         });
         self.load_task = Some(cx.spawn(async move |this, cx| {
@@ -393,46 +425,6 @@ impl DetailsPanel {
                 cx.notify();
             });
         }));
-    }
-
-    /// Stages (`stage`) or unstages `paths` through the tab's shared operation.
-    fn stage(&mut self, paths: Vec<BString>, stage: bool, cx: &mut Context<Self>) {
-        let Some(tab) = self.shown.as_ref().and_then(|(t, _)| t.upgrade()) else {
-            return;
-        };
-        tab.update(cx, |tab, cx| {
-            let label = if stage { "Staging" } else { "Unstaging" };
-            tab.run_op(label, cx, move |repo| async move {
-                match (stage, paths.is_empty()) {
-                    (true, true) => repo.stage_all().await,
-                    (true, false) => repo.stage(&paths).await,
-                    (false, true) => repo.unstage_all().await,
-                    (false, false) => repo.unstage(&paths).await,
-                }
-            })
-        });
-    }
-
-    /// Shows an untracked file as an all-added diff.
-    fn open_untracked(&mut self, path: String, cx: &mut Context<Self>) {
-        let Some(repo) = self
-            .shown
-            .as_ref()
-            .and_then(|(t, _)| t.upgrade())
-            .and_then(|t| t.read(cx).repo.clone())
-        else {
-            return;
-        };
-        let bytes = BString::from(path.as_str());
-        let job = cx
-            .background_executor()
-            .spawn(async move { repo.untracked_diff(&bytes).await });
-        cx.spawn(async move |this, cx| {
-            if let Ok(Some(diff)) = job.await.map(|d| d.into_iter().next()) {
-                _ = this.update(cx, |this, cx| this.open_file(Arc::new(diff), path, cx));
-            }
-        })
-        .detach();
     }
 
     /// `stash@{n}` for a commit id, if it is one of the tab's stashes.
@@ -489,7 +481,8 @@ impl DetailsPanel {
         }
     }
 
-    /// One file line: change letter, name, folder, +/- counts, then `trailing` (a button).
+    /// One file line: change letter, name, folder, LFS chip, +/- counts. The caller adds what
+    /// a click does and any buttons.
     fn file_row(
         &self,
         key: &'static str,
@@ -504,11 +497,6 @@ impl DetailsPanel {
             Some((dir, name)) => (format!("{dir}/"), name.to_string()),
             None => (String::new(), f.path.clone()),
         };
-        let open = match &f.source {
-            Source::Diff(diff) => Ok(diff.clone()),
-            Source::Commit(file) => Err(file.clone()),
-        };
-        let path = f.path.clone();
         let lfs_size = f.lfs.as_ref().map(|c| {
             let size = |p: &Option<git_core::lfs::Pointer>| {
                 p.as_ref().map(|p| git_core::lfs::human_size(p.size))
@@ -557,26 +545,246 @@ impl DetailsPanel {
                         .child(format!("\u{2212}{}", f.removed)),
                 )
             })
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| match &open {
-                Ok(diff) => this.open_file(diff.clone(), path.clone(), cx),
-                Err(file) => this.open_commit_file(file.clone(), path.clone(), cx),
+    }
+
+    /// The repository tab whose row is shown.
+    fn shown_tab(&self) -> Option<Entity<RepoTab>> {
+        self.shown.as_ref().and_then(|(t, _)| t.upgrade())
+    }
+
+    /// The commit box of `tab`, made on first use.
+    fn commit_box(
+        &mut self,
+        tab: &Entity<RepoTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<CommitBox> {
+        let weak = tab.downgrade();
+        if let Some((_, commit_box)) = self.commit_boxes.iter().find(|(t, _)| *t == weak) {
+            return commit_box.clone();
+        }
+        // Closed tabs: drop their drafts.
+        self.commit_boxes.retain(|(t, _)| t.upgrade().is_some());
+        let commit_box = cx.new(|cx| CommitBox::new(tab.clone(), window, cx));
+        self.commit_boxes.push((weak, commit_box.clone()));
+        commit_box
+    }
+
+    fn filter_input(&mut self, window: &mut Window, cx: &mut Context<Self>) -> Entity<InputState> {
+        if let Some((input, _)) = &self.filter {
+            return input.clone();
+        }
+        let input = cx.new(|cx| InputState::new(window, cx).placeholder("Filter files"));
+        let sub = cx.subscribe(&input, |_, _, event: &InputEvent, cx| {
+            if matches!(event, InputEvent::Change) {
+                cx.notify();
+            }
+        });
+        self.filter = Some((input.clone(), sub));
+        input
+    }
+
+    /// The tab's status entries of `section`, only those at `paths` when given.
+    fn wip_entries(
+        &self,
+        section: Section,
+        paths: Option<&[String]>,
+        cx: &App,
+    ) -> Vec<StatusEntry> {
+        let Some(tab) = self.shown_tab() else {
+            return Vec::new();
+        };
+        let Some(status) = tab.read(cx).status.as_ref() else {
+            return Vec::new();
+        };
+        section
+            .entries(status)
+            .into_iter()
+            .filter(|e| paths.is_none_or(|p| p.iter().any(|p| e.path.as_slice() == p.as_bytes())))
+            .collect()
+    }
+
+    /// Stages (unstages for [`Section::Staged`]; marks resolved for conflicts) the files of
+    /// `section` at `paths`.
+    fn wip_stage(&mut self, section: Section, paths: &[String], cx: &mut Context<Self>) {
+        let Some(tab) = self.shown_tab() else {
+            return;
+        };
+        let entries = self.wip_entries(section, Some(paths), cx);
+        if !entries.is_empty() {
+            changes::stage(&tab, &entries, section != Section::Staged, cx);
+        }
+    }
+
+    /// Stages (or unstages) every change at once, new files included.
+    fn wip_stage_everything(&mut self, stage: bool, cx: &mut Context<Self>) {
+        if let Some(tab) = self.shown_tab() {
+            changes::stage(&tab, &[], stage, cx);
+        }
+    }
+
+    /// Discards (tracked) or deletes (untracked) the files of `section` at `paths`, after
+    /// asking.
+    fn wip_discard(
+        &mut self,
+        section: Section,
+        paths: &[String],
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) {
+        let Some(tab) = self.shown_tab() else {
+            return;
+        };
+        let entries = self.wip_entries(section, Some(paths), cx);
+        changes::confirm_discard(&tab, section, entries, window, cx);
+    }
+
+    /// Opens a working-copy file's staging diff in the centre.
+    fn open_working(&mut self, section: Section, path: String, cx: &mut Context<Self>) {
+        let Some((tab, _)) = self.shown.clone() else {
+            return;
+        };
+        self.link.update(cx, |link, cx| {
+            let bytes = BString::from(path.as_str());
+            link.set_open_file(Some(path), cx);
+            cx.emit(LinkEvent::ShowWorkingFile {
+                tab,
+                section,
+                path: bytes,
+            });
+        });
+    }
+
+    /// Adds the WIP actions to a file row: lock chip, lock / discard on hover, the stage
+    /// toggle. A click opens the staging diff; a double click toggles staging.
+    #[allow(clippy::too_many_arguments)]
+    fn wip_row(
+        &self,
+        row: gpui_kit::Stateful<gpui_kit::Div>,
+        key: &'static str,
+        i: usize,
+        section: Section,
+        path: &str,
+        busy: bool,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> gpui_kit::Stateful<gpui_kit::Div> {
+        let bytes = BString::from(path);
+        let (attrs, lock) = self.shown_tab().map_or_else(Default::default, |tab| {
+            let tab = tab.read(cx);
+            let attrs = tab.lfs_attrs.get(&bytes).copied().unwrap_or_default();
+            let lock = tab
+                .lock_on(&bytes)
+                .map(|l| (l.ours, SharedString::from(l.owner.clone())));
+            (attrs, lock)
+        });
+        let id = |what: &str| ElementId::NamedInteger(format!("{key}-{what}").into(), i as u64);
+        let button = |what: &str| Button::new(id(what)).ghost().xsmall().disabled(busy);
+        let (toggle, toggle_tip) = match section {
+            Section::Staged => ("\u{2212}", "Unstage"),
+            Section::Conflicted => ("+", "Mark resolved (stage it)"),
+            Section::Unstaged | Section::Untracked => ("+", "Stage"),
+        };
+        let discard = matches!(section, Section::Unstaged | Section::Untracked);
+        // Lockable LFS files: lock before editing so nobody else does.
+        let lockable = attrs.lockable && lock.as_ref().is_none_or(|(ours, _)| *ours);
+        let locked = lock.is_some();
+        let open = path.to_string();
+        let one = vec![path.to_string()];
+        let (stage_one, discard_one) = (one.clone(), one.clone());
+        row.group("wip-row")
+            .on_click(cx.listener(move |this, event: &ClickEvent, _, cx| {
+                if event.click_count() >= 2 {
+                    this.wip_stage(section, &one, cx)
+                } else {
+                    this.open_working(section, open.clone(), cx)
+                }
             }))
+            .when_some(lock.clone(), |d, (ours, owner)| {
+                d.child(changes::lock_badge(id("lock-badge"), ours, owner, palette))
+            })
+            .child(
+                h_flex()
+                    .flex_none()
+                    .invisible()
+                    .group_hover("wip-row", |s| s.visible())
+                    .when(lockable, |d| {
+                        d.child(
+                            button("lock")
+                                .icon(if locked {
+                                    IconName::LockOpen
+                                } else {
+                                    IconName::Lock
+                                })
+                                .tooltip(if locked {
+                                    "Unlock (let others edit it)"
+                                } else {
+                                    "Lock (stop others editing it)"
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                    cx.stop_propagation();
+                                    let Some(tab) = this.shown_tab() else { return };
+                                    let path = bytes.clone();
+                                    tab.update(cx, |tab, cx| {
+                                        tab.set_lock(path, !locked, false, cx)
+                                    });
+                                })),
+                        )
+                    })
+                    .when(discard, |d| {
+                        d.child(
+                            button("discard")
+                                .icon(IconName::Undo2)
+                                .tooltip(if section == Section::Untracked {
+                                    "Delete\u{2026}"
+                                } else {
+                                    "Discard\u{2026}"
+                                })
+                                .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                    cx.stop_propagation();
+                                    this.wip_discard(section, &discard_one, window, cx)
+                                })),
+                        )
+                    }),
+            )
+            .child(
+                button("toggle")
+                    .label(toggle)
+                    .tooltip(toggle_tip)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        cx.stop_propagation();
+                        this.wip_stage(section, &stage_one, cx)
+                    })),
+            )
     }
 
     fn render_wip(
         &self,
         wip: &Arc<WipLoaded>,
+        commit_box: Entity<CommitBox>,
+        filter: Entity<InputState>,
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = self.link.read(cx).open_file().map(str::to_owned);
-        let busy = self
-            .shown
-            .as_ref()
-            .and_then(|(t, _)| t.upgrade())
-            .is_some_and(|t| t.read(cx).is_busy());
+        let (busy, stash_count) = self.shown_tab().map_or((false, 0), |t| {
+            let t = t.read(cx);
+            (t.is_busy(), t.status.as_ref().map_or(0, |s| s.stash_count))
+        });
+        let needle = filter.read(cx).value().trim().to_lowercase();
+        let filtering = !needle.is_empty();
+        let shown = |path: &str| !filtering || path.to_lowercase().contains(&needle);
+        let staged: Vec<&FileEntry> = wip.staged.iter().filter(|f| shown(&f.path)).collect();
+        let unstaged: Vec<&FileEntry> = wip.unstaged.iter().filter(|f| shown(&f.path)).collect();
+        let untracked: Vec<&String> = wip.untracked.iter().filter(|p| shown(p)).collect();
+        let conflicted: Vec<&String> = wip.conflicted.iter().filter(|p| shown(p)).collect();
+        let paths_of =
+            |files: &[&FileEntry]| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
+        let strings = |paths: &[&String]| paths.iter().map(|p| (*p).clone()).collect::<Vec<_>>();
+
         let heading = |text: String| {
             div()
+                .flex_1()
                 .pt_1()
                 .pb_0p5()
                 .text_xs()
@@ -584,19 +792,33 @@ impl DetailsPanel {
                 .text_color(palette.muted)
                 .child(text)
         };
-        let toggle = |key: &'static str, i: usize, label: &'static str, tip: &'static str| {
-            Button::new(ElementId::NamedInteger(key.into(), i as u64))
+        let section_button = |id: &'static str, label: &'static str, tip: &'static str| {
+            Button::new(id)
                 .ghost()
                 .xsmall()
                 .label(label)
                 .tooltip(tip)
                 .disabled(busy)
         };
-        let unstaged_count = wip.unstaged.len() + wip.untracked.len();
-        let mut body = v_flex().gap_0p5().p_3().text_sm().child(
+        let discard_all = |id: &'static str, tip: &'static str| {
+            Button::new(id)
+                .ghost()
+                .xsmall()
+                .icon(IconName::Undo2)
+                .tooltip(tip)
+                .disabled(busy)
+        };
+        let none =
+            |text: &'static str| div().px_1().text_xs().text_color(palette.muted).child(text);
+        let split = |p: &str| match p.rsplit_once('/') {
+            Some((dir, name)) => (format!("{dir}/"), name.to_string()),
+            None => (String::new(), p.to_string()),
+        };
+
+        let mut body = v_flex().gap_0p5().p_3().child(
             h_flex()
-                .gap_2()
-                .pb_2()
+                .gap_1()
+                .pb_1()
                 .child(
                     div()
                         .flex_1()
@@ -605,126 +827,222 @@ impl DetailsPanel {
                         .child("Uncommitted changes"),
                 )
                 .child(
-                    Button::new("wip-commit")
-                        .primary()
-                        .small()
-                        .label("Commit\u{2026}")
-                        .tooltip("Write the message and commit in the Changes view")
-                        .on_click(|_: &ClickEvent, window, cx| {
-                            window.dispatch_action(Box::new(crate::actions::ShowChanges), cx)
-                        }),
+                    Button::new("wip-explain")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Bot)
+                        .tooltip("Ask Claude to explain the uncommitted changes")
+                        .on_click(cx.listener(|this, _: &ClickEvent, window, cx| {
+                            if let Some(tab) = this.shown_tab() {
+                                crate::chat::context::explain_wip(&tab, window, cx)
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("wip-stash")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::Archive)
+                        .label("Stash")
+                        .disabled(busy)
+                        .tooltip("Stash all changes, including untracked files")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            if let Some(tab) = this.shown_tab() {
+                                changes::stash(&tab, cx)
+                            }
+                        })),
+                )
+                .child(
+                    Button::new("wip-stash-pop")
+                        .ghost()
+                        .xsmall()
+                        .icon(IconName::ArchiveRestore)
+                        .label(format!("Pop ({stash_count})"))
+                        .disabled(busy || stash_count == 0)
+                        .tooltip("Apply the latest stash and drop it")
+                        .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                            if let Some(tab) = this.shown_tab() {
+                                changes::stash_pop(&tab, cx)
+                            }
+                        })),
                 ),
         );
         body = body.child(
+            div()
+                .pb_1()
+                .child(Input::new(&filter).small().cleanable(true)),
+        );
+
+        if !conflicted.is_empty() {
+            let paths = strings(&conflicted);
+            body = body.child(
+                h_flex()
+                    .child(heading(format!("CONFLICTED ({})", conflicted.len())))
+                    .child(
+                        section_button(
+                            "wip-resolve-all",
+                            "Mark all resolved",
+                            "Stage every conflicted file as resolved",
+                        )
+                        .on_click(cx.listener(
+                            move |this, _: &ClickEvent, _, cx| {
+                                this.wip_stage(Section::Conflicted, &paths, cx)
+                            },
+                        )),
+                    ),
+            );
+            for (i, p) in conflicted.iter().enumerate() {
+                let (dir, name) = split(p);
+                let row = name_row(
+                    "wip-conflicted",
+                    i,
+                    "U",
+                    palette.warn,
+                    name,
+                    dir,
+                    open.as_deref() == Some(p.as_str()),
+                    palette,
+                    cx,
+                );
+                body = body.child(self.wip_row(
+                    row,
+                    "wip-conflicted",
+                    i,
+                    Section::Conflicted,
+                    p,
+                    busy,
+                    palette,
+                    cx,
+                ));
+            }
+        }
+
+        let staged_paths = paths_of(&staged);
+        body = body.child(
             h_flex()
-                .child(
-                    div()
-                        .flex_1()
-                        .child(heading(format!("STAGED ({})", wip.staged.len()))),
-                )
-                .when(!wip.staged.is_empty(), |d| {
+                .when(!conflicted.is_empty(), |d| d.pt_2())
+                .child(heading(format!("STAGED ({})", staged.len())))
+                .when(!staged.is_empty(), |d| {
                     d.child(
-                        toggle(
+                        section_button(
                             "wip-unstage-all",
-                            0,
                             "Unstage all",
                             "Move every staged change back",
                         )
                         .on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| this.stage(Vec::new(), false, cx),
+                            move |this, _: &ClickEvent, _, cx| {
+                                if filtering {
+                                    this.wip_stage(Section::Staged, &staged_paths, cx)
+                                } else {
+                                    this.wip_stage_everything(false, cx)
+                                }
+                            },
                         )),
                     )
                 }),
         );
-        if wip.staged.is_empty() {
-            body = body.child(
-                div()
-                    .px_1()
-                    .text_xs()
-                    .text_color(palette.muted)
-                    .child("Nothing staged yet."),
-            );
+        if staged.is_empty() {
+            body = body.child(none("Nothing staged yet."));
         }
-        for (i, f) in wip.staged.iter().enumerate() {
-            let path = BString::from(f.path.as_str());
-            body = body.child(
-                self.file_row(
-                    "wip-staged",
-                    i,
-                    f,
-                    open.as_deref() == Some(f.path.as_str()),
-                    palette,
-                    cx,
-                )
-                .child(
-                    toggle("wip-unstage", i, "\u{2212}", "Unstage").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.stage(vec![path.clone()], false, cx)
-                        },
-                    )),
-                ),
-            );
+        for (i, f) in staged.iter().enumerate() {
+            let selected = open.as_deref() == Some(f.path.as_str());
+            let row = self.file_row("wip-staged", i, f, selected, palette, cx);
+            body = body.child(self.wip_row(
+                row,
+                "wip-staged",
+                i,
+                Section::Staged,
+                &f.path,
+                busy,
+                palette,
+                cx,
+            ));
         }
+
+        let unstaged_paths = paths_of(&unstaged);
+        let discard_paths = unstaged_paths.clone();
         body = body.child(
             h_flex()
                 .pt_2()
-                .child(
-                    div()
-                        .flex_1()
-                        .child(heading(format!("UNSTAGED ({unstaged_count})"))),
-                )
-                .when(unstaged_count > 0, |d| {
+                .child(heading(format!("UNSTAGED ({})", unstaged.len())))
+                .when(!unstaged.is_empty(), |d| {
                     d.child(
-                        toggle(
+                        section_button(
                             "wip-stage-all",
-                            0,
                             "Stage all",
-                            "Stage every change and new file",
+                            if filtering {
+                                "Stage the listed changes"
+                            } else {
+                                "Stage every change and new file"
+                            },
                         )
                         .on_click(cx.listener(
-                            |this, _: &ClickEvent, _, cx| this.stage(Vec::new(), true, cx),
+                            move |this, _: &ClickEvent, _, cx| {
+                                if filtering {
+                                    this.wip_stage(Section::Unstaged, &unstaged_paths, cx)
+                                } else {
+                                    this.wip_stage_everything(true, cx)
+                                }
+                            },
                         )),
+                    )
+                })
+                .when(!unstaged.is_empty(), |d| {
+                    d.child(
+                        discard_all("wip-discard-all", "Discard all unstaged changes\u{2026}")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.wip_discard(Section::Unstaged, &discard_paths, window, cx)
+                            })),
                     )
                 }),
         );
-        if unstaged_count == 0 {
-            body = body.child(
-                div()
-                    .px_1()
-                    .text_xs()
-                    .text_color(palette.muted)
-                    .child("No unstaged changes."),
-            );
+        if unstaged.is_empty() {
+            body = body.child(none("No unstaged changes."));
         }
-        for (i, f) in wip.unstaged.iter().enumerate() {
-            let path = BString::from(f.path.as_str());
-            body = body.child(
-                self.file_row(
-                    "wip-unstaged",
-                    i,
-                    f,
-                    open.as_deref() == Some(f.path.as_str()),
-                    palette,
-                    cx,
-                )
-                .child(toggle("wip-stage", i, "+", "Stage").on_click(cx.listener(
-                    move |this, _: &ClickEvent, _, cx| {
-                        cx.stop_propagation();
-                        this.stage(vec![path.clone()], true, cx)
-                    },
-                ))),
-            );
+        for (i, f) in unstaged.iter().enumerate() {
+            let selected = open.as_deref() == Some(f.path.as_str());
+            let row = self.file_row("wip-unstaged", i, f, selected, palette, cx);
+            body = body.child(self.wip_row(
+                row,
+                "wip-unstaged",
+                i,
+                Section::Unstaged,
+                &f.path,
+                busy,
+                palette,
+                cx,
+            ));
         }
-        for (i, p) in wip.untracked.iter().enumerate() {
-            let (dir, name) = match p.rsplit_once('/') {
-                Some((dir, name)) => (format!("{dir}/"), name.to_string()),
-                None => (String::new(), p.clone()),
-            };
-            let stage_path = BString::from(p.as_str());
-            let open_path = p.clone();
+
+        if !untracked.is_empty() {
+            let stage_paths = strings(&untracked);
+            let delete_paths = stage_paths.clone();
             body = body.child(
-                name_row(
+                h_flex()
+                    .pt_2()
+                    .child(heading(format!("UNTRACKED ({})", untracked.len())))
+                    .child(
+                        section_button("wip-stage-new", "Stage all", "Stage the new files")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                this.wip_stage(Section::Untracked, &stage_paths, cx)
+                            })),
+                    )
+                    .child(
+                        discard_all("wip-delete-all", "Delete all untracked files\u{2026}")
+                            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                                this.wip_discard(Section::Untracked, &delete_paths, window, cx)
+                            })),
+                    ),
+            );
+            for (i, p) in untracked.iter().enumerate() {
+                let (dir, name) = split(p);
+                let lfs = self.shown_tab().is_some_and(|t| {
+                    t.read(cx)
+                        .lfs_attrs
+                        .get(&BString::from(p.as_str()))
+                        .is_some_and(|a| a.lfs)
+                });
+                let row = name_row(
                     "wip-untracked",
                     i,
                     "?",
@@ -735,20 +1053,31 @@ impl DetailsPanel {
                     palette,
                     cx,
                 )
-                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                    this.open_untracked(open_path.clone(), cx)
-                }))
-                .child(
-                    toggle("wip-stage-new", i, "+", "Stage").on_click(cx.listener(
-                        move |this, _: &ClickEvent, _, cx| {
-                            cx.stop_propagation();
-                            this.stage(vec![stage_path.clone()], true, cx)
-                        },
-                    )),
-                ),
-            );
+                .when(lfs, |d| d.child(changes::lfs_badge(palette)));
+                body = body.child(self.wip_row(
+                    row,
+                    "wip-untracked",
+                    i,
+                    Section::Untracked,
+                    p,
+                    busy,
+                    palette,
+                    cx,
+                ));
+            }
         }
-        body.into_any_element()
+
+        v_flex()
+            .text_sm()
+            .child(
+                div()
+                    .p_3()
+                    .border_b_1()
+                    .border_color(palette.border)
+                    .child(commit_box),
+            )
+            .child(body)
+            .into_any_element()
     }
 
     fn open_file(&mut self, file: Arc<FileDiff>, path: String, cx: &mut Context<Self>) {
@@ -928,9 +1257,35 @@ impl DetailsPanel {
                                     .xsmall()
                                     .label("Copy")
                                     .tooltip("Copy the full SHA")
-                                    .on_click(move |_: &ClickEvent, _, cx| {
-                                        cx.write_to_clipboard(ClipboardItem::new_string(id.clone()))
+                                    .on_click({
+                                        let id = id.clone();
+                                        move |_: &ClickEvent, _, cx| {
+                                            cx.write_to_clipboard(ClipboardItem::new_string(
+                                                id.clone(),
+                                            ))
+                                        }
                                     }),
+                            )
+                            .child(
+                                Button::new("explain-commit")
+                                    .ghost()
+                                    .xsmall()
+                                    .icon(IconName::Bot)
+                                    .label("Explain")
+                                    .tooltip("Ask Claude to explain this commit's diff")
+                                    .on_click(cx.listener({
+                                        let id = id.clone();
+                                        move |this, _: &ClickEvent, window, cx| {
+                                            if let Some(tab) = this.shown_tab() {
+                                                crate::chat::context::explain_commit(
+                                                    &tab,
+                                                    id.clone(),
+                                                    window,
+                                                    cx,
+                                                );
+                                            }
+                                        }
+                                    })),
                             ),
                     )
                     .when(!c.parents.is_empty(), |d| {
@@ -1006,7 +1361,14 @@ impl DetailsPanel {
                             .enumerate()
                             .map(|(i, f)| {
                                 let selected = open.as_deref() == Some(f.path.as_str());
+                                let file = f.source.clone();
+                                let path = f.path.clone();
                                 self.file_row("details-file", i, f, selected, palette, cx)
+                                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                                        if let Some(file) = &file {
+                                            this.open_commit_file(file.clone(), path.clone(), cx)
+                                        }
+                                    }))
                             }),
                     )
                     .when(!self.show_all && loaded.files.len() > FILE_LIMIT, |d| {
@@ -1102,7 +1464,7 @@ fn file_entry(diff: FileDiff) -> FileEntry {
         lfs_tracked: false,
         change: diff.change,
         path,
-        source: Source::Diff(Arc::new(diff)),
+        source: None,
     }
 }
 
@@ -1138,7 +1500,7 @@ impl Focusable for DetailsPanel {
 }
 
 impl Render for DetailsPanel {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(cx);
         let hint = |text: SharedString| {
             div()
@@ -1158,7 +1520,14 @@ impl Render for DetailsPanel {
             }
             State::Wip(wip) => {
                 let wip = wip.clone();
-                self.render_wip(&wip, &palette, cx)
+                match self.shown_tab() {
+                    Some(tab) => {
+                        let commit_box = self.commit_box(&tab, window, cx);
+                        let filter = self.filter_input(window, cx);
+                        self.render_wip(&wip, commit_box, filter, &palette, cx)
+                    }
+                    None => hint("This tab was closed.".into()),
+                }
             }
         };
         div()

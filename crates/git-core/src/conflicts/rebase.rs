@@ -71,7 +71,10 @@ pub(crate) fn sh_path(path: &Path) -> String {
 }
 
 /// The todo text plus the message files it refers to (written by the caller into `dir`).
-pub(crate) fn build_todo(items: &[TodoItem], dir: &Path) -> Result<(String, Vec<(PathBuf, String)>)> {
+pub(crate) fn build_todo(
+    items: &[TodoItem],
+    dir: &Path,
+) -> Result<(String, Vec<(PathBuf, String)>)> {
     let invalid = |value: String| GitError::InvalidArgument {
         what: "rebase plan",
         value,
@@ -93,7 +96,7 @@ pub(crate) fn build_todo(items: &[TodoItem], dir: &Path) -> Result<(String, Vec<
             return Err(invalid(format!(
                 "{} {}: nothing earlier to meld into",
                 item.action.label(),
-                &item.commit
+                item.commit
             )));
         }
         kept_any |= !matches!(item.action, TodoAction::Drop);
@@ -176,10 +179,16 @@ mod tests {
         assert!(bad(&[item("aaaa111\nexec rm -rf /", TodoAction::Pick)]));
         assert!(bad(&[item("--root", TodoAction::Pick)]));
         assert!(bad(&[item("aaaa111", TodoAction::Squash)]));
-        assert!(bad(&[item("aaaa111", TodoAction::Drop), item("bbbb222", TodoAction::Fixup)]));
+        assert!(bad(&[
+            item("aaaa111", TodoAction::Drop),
+            item("bbbb222", TodoAction::Fixup)
+        ]));
         assert!(bad(&[item("aaaa111", TodoAction::Drop)]));
         assert!(bad(&[item("aaaa111", TodoAction::Reword("  ".into()))]));
-        assert!(!bad(&[item("aaaa111", TodoAction::Drop), item("bbbb222", TodoAction::Pick)]));
+        assert!(!bad(&[
+            item("aaaa111", TodoAction::Drop),
+            item("bbbb222", TodoAction::Pick)
+        ]));
     }
 
     #[test]

@@ -296,8 +296,19 @@ mod tests {
             ["danger", "_accept_invalid"].concat(),
             ["tls_", "danger"].concat(),
         ];
-        for entry in std::fs::read_dir(dir).unwrap() {
-            let path = entry.unwrap().path();
+        let mut dirs = vec![std::path::PathBuf::from(dir)];
+        let mut files = Vec::new();
+        while let Some(dir) = dirs.pop() {
+            for entry in std::fs::read_dir(dir).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    dirs.push(path);
+                } else {
+                    files.push(path);
+                }
+            }
+        }
+        for path in files {
             let text = std::fs::read_to_string(&path).unwrap();
             for word in &forbidden {
                 assert!(

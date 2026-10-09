@@ -527,3 +527,38 @@ fn defaults_are_unsupported() {
         "Merge request"
     );
 }
+
+#[test]
+fn closing_and_reopening_an_issue_patches_its_state() {
+    let (replay, gh) = setup(Duration::ZERO);
+    assert!(gh.supports(Feature::CloseIssue));
+    let url = format!("{API}/repos/InfernoDragon0/GitDragon/issues/7");
+    let issue = |state: &str| {
+        json!({
+            "number": 7, "title": "Crash", "state": state,
+            "html_url": "https://github.com/InfernoDragon0/GitDragon/issues/7",
+            "created_at": "2026-10-09T10:00:00Z", "updated_at": "2026-10-09T12:00:00Z"
+        })
+    };
+    replay.push(Route::new("PATCH", &url, 200, issue("closed")).once());
+    replay.push(Route::new("PATCH", &url, 200, issue("open")).once());
+
+    let closed = block_on(gh.set_issue_state(&repo(), 7, false)).unwrap();
+    assert_eq!(closed.state, IssueState::Closed);
+    let sent = replay.seen().pop().unwrap();
+    assert_eq!(sent.method, Method::Patch);
+    assert_eq!(sent.body.unwrap(), json!({"state": "closed"}));
+
+    let reopened = block_on(gh.set_issue_state(&repo(), 7, true)).unwrap();
+    assert_eq!(reopened.state, IssueState::Open);
+    assert_eq!(
+        replay.seen().pop().unwrap().body.unwrap(),
+        json!({"state": "open"})
+    );
+}
+
+#[test]
+fn fork_pull_requests_are_fetched_through_the_pull_ref() {
+    let (_, gh) = setup(Duration::ZERO);
+    assert_eq!(gh.pull_head_ref(42).as_deref(), Some("pull/42/head"));
+}

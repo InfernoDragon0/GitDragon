@@ -20,6 +20,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::api::{ApiClient, RateLimit};
+use crate::boards::{Board, BoardColumn, BoardItem, BoardPage};
 use crate::error::HostError;
 use crate::host::{GitHost, HostResult};
 use crate::http::{Auth, Method, Transport};
@@ -37,10 +38,17 @@ const WIQL_MAX: usize = 20_000;
 /// Recent builds looked at for CI status.
 const BUILDS_TOP: &str = "25";
 const CLOSED_STATES: &str = "'Closed','Done','Removed','Resolved'";
+/// States `set_issue_state` tries, per process template, in order.
+const CLOSE_STATES: &[&str] = &["Closed", "Done"];
+const REOPEN_STATES: &[&str] = &["Active", "To Do", "New"];
 const WORK_ITEM_FIELDS: &str = "System.Id,System.Title,System.State,System.CreatedBy,System.AssignedTo,System.Tags,System.CreatedDate,System.ChangedDate,System.CommentCount,System.Description";
 /// Work item type `create_issue` makes: Agile, Basic and CMMI processes have "Issue"; Scrum
 /// projects do not (they would need "Product Backlog Item" or "Bug").
 const NEW_ITEM_TYPE: &str = "$Issue";
+
+/// Azure Boards.
+#[path = "boards/az.rs"]
+mod boards;
 
 pub struct AzureDevOps {
     api: ApiClient,
@@ -275,6 +283,9 @@ impl GitHost for AzureDevOps {
         HostKind::AzureDevOps
     }
 
+    /// No `Feature::Avatars`: Azure avatars (`.../_apis/GraphProfile/MemberAvatars/...`) need
+    /// credentials, and the app's avatar fetch never sends tokens; revisit if an authenticated
+    /// image fetch is added.
     fn supports(&self, feature: Feature) -> bool {
         matches!(
             feature,
@@ -286,7 +297,9 @@ impl GitHost for AzureDevOps {
                 | Feature::Issues
                 | Feature::CreateIssue
                 | Feature::IssueComments
+                | Feature::CloseIssue
                 | Feature::CiStatus
+                | Feature::Boards
         )
     }
 
@@ -329,6 +342,8 @@ impl GitHost for AzureDevOps {
                 self.api.invalidate(&[project, "_apis", "build"]);
                 // Work item batches are organisation-wide: drop them all.
                 self.api.invalidate(&["_apis", "wit", "workitems"]);
+                // Boards, team settings and WIQL answers live under the project.
+                self.api.invalidate(&[project]);
             }
             None => self.api.clear_cache(),
         }
@@ -564,6 +579,38 @@ impl GitHost for AzureDevOps {
         })
     }
 
+    /// Sets `System.State`. The state names depend on the project's process (Agile / CMMI:
+    /// Active, Closed; Basic: To Do, Done), so each candidate is tried until one is accepted.
+    async fn set_issue_state(&self, repo: &RepoId, number: u64, open: bool) -> HostResult<Issue> {
+        let project = project(repo)?;
+        let n = number.to_string();
+        let candidates: &[&str] = if open { REOPEN_STATES } else { CLOSE_STATES };
+        let mut last = None;
+        for state in candidates {
+            let url = self.url(&[project, "_apis", "wit", "workitems", &n], &[]);
+            let ops = json!([{ "op": "add", "path": "/fields/System.State", "value": state }]);
+            match (self.api)
+                .send_json_as(
+                    Method::Patch,
+                    url,
+                    &ops,
+                    Some("application/json-patch+json"),
+                )
+                .await
+            {
+                Ok(answer) => {
+                    self.invalidate(Some(repo));
+                    let raw: AzWorkItem = self.decode(&answer)?;
+                    return Ok(self.issue(project, raw));
+                }
+                // This process has no such state: try the next name.
+                Err(err @ HostError::Invalid { .. }) => last = Some(err),
+                Err(err) => return Err(err),
+            }
+        }
+        Err(last.unwrap_or(HostError::Unsupported(Feature::CloseIssue)))
+    }
+
     /// The latest build of every pipeline for a branch (or, for a 40-hex commit, among the
     /// recent builds of the repo). Builds are filtered by repository id, which one extra
     /// (cached) GET resolves from the name.
@@ -599,6 +646,38 @@ impl GitHost for AzureDevOps {
             })
             .collect();
         Ok(CiStatus::from_checks(checks))
+    }
+
+    async fn boards(&self, repo: &RepoId) -> HostResult<Vec<Board>> {
+        boards::boards(self, repo).await
+    }
+
+    async fn board(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        cursor: Option<&str>,
+    ) -> HostResult<BoardPage> {
+        boards::board(self, board, cursor).await
+    }
+
+    async fn move_board_item(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        item: &BoardItem,
+        to: &BoardColumn,
+    ) -> HostResult<BoardItem> {
+        boards::move_item(self, board, item, to).await
+    }
+
+    async fn board_item(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        item: &BoardItem,
+    ) -> HostResult<BoardItem> {
+        boards::item_detail(self, board, item).await
     }
 }
 

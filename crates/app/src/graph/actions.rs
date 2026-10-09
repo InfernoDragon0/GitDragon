@@ -1,7 +1,9 @@
-//! Row context menu: checkout, branch / tag here, cherry-pick, revert, reset, copy SHA. Write
+//! Row context menu: checkout, branch / tag here, merge / rebase, cherry-pick, revert, reset,
+//! copy SHA. Write
 //! operations run on the background executor; the tab refresh that follows reloads the graph
 //! when refs move.
 
+use git_core::conflicts::MergeMode;
 use git_core::{CliRepo, ResetMode};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
@@ -32,6 +34,12 @@ enum RowAction {
     Checkout(Option<String>),
     CreateBranch,
     CreateTag,
+    /// Merge this commit (or its branch) into the current branch.
+    Merge(MergeMode),
+    /// Rebase the current branch onto this commit (or its branch).
+    Rebase,
+    /// Interactive rebase of the commits after this one.
+    InteractiveRebase,
     CherryPick,
     Revert,
     Reset(ResetMode),
@@ -50,12 +58,17 @@ pub fn build_menu(menu: PopupMenu, info: &RowInfo, view: WeakEntity<GraphView>) 
         return menu
             .min_w(px(200.))
             .item(
-                PopupMenuItem::new("Open in Changes").on_click(|_, window, cx| {
+                PopupMenuItem::new("Commit changes\u{2026}").on_click(|_, window, cx| {
                     window.dispatch_action(Box::new(crate::actions::ShowChanges), cx)
                 }),
             );
     }
     let short = &info.id[..info.id.len().min(7)];
+    let target = info
+        .branches
+        .first()
+        .map_or(short, String::as_str)
+        .to_string();
     let mut menu = menu.min_w(px(240.));
     for branch in info.branches.iter().take(4) {
         menu = menu.item(item(
@@ -73,6 +86,35 @@ pub fn build_menu(menu: PopupMenu, info: &RowInfo, view: WeakEntity<GraphView>) 
         RowAction::CreateBranch,
     ))
     .item(item("Create tag here\u{2026}".into(), RowAction::CreateTag))
+    .separator()
+    .item(
+        item(
+            format!("Merge {target} into current branch"),
+            RowAction::Merge(MergeMode::Default),
+        )
+        .disabled(info.head),
+    )
+    .item(
+        item(
+            format!("Merge {target} (always a merge commit)"),
+            RowAction::Merge(MergeMode::NoFastForward),
+        )
+        .disabled(info.head),
+    )
+    .item(
+        item(
+            format!("Rebase current branch onto {target}"),
+            RowAction::Rebase,
+        )
+        .disabled(info.head),
+    )
+    .item(
+        item(
+            "Interactive rebase of the commits after this\u{2026}".into(),
+            RowAction::InteractiveRebase,
+        )
+        .disabled(info.head),
+    )
     .separator()
     .item(item("Cherry-pick commit".into(), RowAction::CherryPick).disabled(info.head))
     .item(item("Revert commit".into(), RowAction::Revert))
@@ -118,19 +160,37 @@ impl GraphView {
             }
             RowAction::CreateBranch => self.prompt_name(NameKind::Branch, id, window, cx),
             RowAction::CreateTag => self.prompt_name(NameKind::Tag, id, window, cx),
-            RowAction::CherryPick => {
-                self.run_op(
-                    cx,
-                    move |repo| async move { repo.cherry_pick(&id, merge).await },
-                )
+            RowAction::Merge(mode) => {
+                let rev = info.branches.first().cloned().unwrap_or(id);
+                self.run_op_undoable(cx, format!("Merging {rev}"), move |repo| async move {
+                    repo.merge(&rev, mode).await
+                })
             }
-            RowAction::Revert => {
-                self.run_op(cx, move |repo| async move { repo.revert(&id, merge).await })
+            RowAction::Rebase => {
+                let rev = info.branches.first().cloned().unwrap_or(id);
+                self.run_op_undoable(cx, format!("Rebasing onto {rev}"), move |repo| async move {
+                    repo.rebase(&rev).await
+                })
             }
+            RowAction::InteractiveRebase => {
+                crate::conflicts::rebase_dialog::open(self.tab.clone(), id, window, cx)
+            }
+            RowAction::CherryPick => self.run_op_undoable(
+                cx,
+                format!("Cherry-picking {}", short_id(&id)),
+                move |repo| async move { repo.cherry_pick(&id, merge).await },
+            ),
+            RowAction::Revert => self.run_op_undoable(
+                cx,
+                format!("Reverting {}", short_id(&id)),
+                move |repo| async move { repo.revert(&id, merge).await },
+            ),
             RowAction::Reset(ResetMode::Hard) => self.confirm_hard_reset(id, window, cx),
-            RowAction::Reset(mode) => {
-                self.run_op(cx, move |repo| async move { repo.reset(mode, &id).await })
-            }
+            RowAction::Reset(mode) => self.run_op_undoable(
+                cx,
+                format!("Resetting to {}", short_id(&id)),
+                move |repo| async move { repo.reset(mode, &id).await },
+            ),
             RowAction::CopySha => cx.write_to_clipboard(ClipboardItem::new_string(id)),
         }
     }
@@ -144,6 +204,18 @@ impl GraphView {
     {
         self.tab
             .update(cx, |tab, cx| tab.run_op("Graph action", cx, op));
+    }
+
+    /// [`Self::run_op`] for operations that can be undone from the reflog (the toast and the
+    /// operation strip then offer an Undo).
+    pub(super) fn run_op_undoable<F, Fut>(&mut self, cx: &mut Context<Self>, label: String, op: F)
+    where
+        F: FnOnce(CliRepo) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = git_core::Result<()>> + Send + 'static,
+    {
+        self.tab.update(cx, |tab, cx| {
+            tab.run_op_undoable(label, crate::undo::UndoPlan::Head, cx, op)
+        });
     }
 
     fn confirm_hard_reset(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
@@ -164,9 +236,11 @@ impl GraphView {
                 .on_ok(move |_, _, cx| {
                     let id = id.clone();
                     _ = this.update(cx, |view, cx| {
-                        view.run_op(cx, move |repo| async move {
-                            repo.reset(ResetMode::Hard, &id).await
-                        })
+                        view.run_op_undoable(
+                            cx,
+                            format!("Hard reset to {}", short_id(&id)),
+                            move |repo| async move { repo.reset(ResetMode::Hard, &id).await },
+                        )
                     });
                     true
                 })
@@ -277,4 +351,9 @@ impl NameKind {
             NameKind::Tag => "Tag name, e.g. v1.2.0",
         }
     }
+}
+
+/// First seven characters of a commit id, for operation labels.
+fn short_id(id: &str) -> &str {
+    &id[..id.len().min(7)]
 }

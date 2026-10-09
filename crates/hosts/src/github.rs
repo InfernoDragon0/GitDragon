@@ -11,6 +11,7 @@ use serde_json::{Value, json};
 use url::Url;
 
 use crate::api::{ApiClient, RateLimit};
+use crate::boards::{Board, BoardColumn, BoardItem, BoardPage};
 use crate::error::HostError;
 use crate::host::{GitHost, HostResult};
 use crate::http::{Auth, Method, Transport};
@@ -18,6 +19,10 @@ use crate::model::*;
 use crate::remote::RepoId;
 
 const API_VERSION: &str = "2022-11-28";
+
+/// Projects (v2) over GraphQL.
+#[path = "boards/gh.rs"]
+mod boards;
 
 pub struct GitHub {
     api: ApiClient,
@@ -144,8 +149,10 @@ impl GitHost for GitHub {
                 | Feature::Issues
                 | Feature::CreateIssue
                 | Feature::IssueComments
+                | Feature::CloseIssue
                 | Feature::CiStatus
                 | Feature::Avatars
+                | Feature::Boards
         )
     }
 
@@ -179,13 +186,21 @@ impl GitHost for GitHub {
         })
     }
 
+    fn pull_head_ref(&self, number: u64) -> Option<String> {
+        Some(format!("pull/{number}/head"))
+    }
+
     fn rate_limit(&self) -> RateLimit {
         self.api.rate_limit()
     }
 
     fn invalidate(&self, repo: Option<&RepoId>) {
         match repo {
-            Some(repo) => self.api.invalidate(&["repos", &repo.owner, &repo.repo]),
+            Some(repo) => {
+                self.api.invalidate(&["repos", &repo.owner, &repo.repo]);
+                // Project boards are GraphQL queries, cached by body.
+                self.api.invalidate_url(&self.graphql_url());
+            }
             None => self.api.clear_cache(),
         }
     }
@@ -321,6 +336,18 @@ impl GitHost for GitHub {
         })
     }
 
+    async fn set_issue_state(&self, repo: &RepoId, number: u64, open: bool) -> HostResult<Issue> {
+        let n = number.to_string();
+        let url = self.repo_url(repo, &["issues", &n], &[]);
+        let state = if open { "open" } else { "closed" };
+        let answer = self
+            .api
+            .send_json(Method::Patch, url, &json!({ "state": state }))
+            .await?;
+        self.invalidate(Some(repo));
+        Ok(self.api.decode::<GhIssue>(&answer)?.into())
+    }
+
     /// Check runs (Actions and apps) plus legacy commit statuses. A token without the checks
     /// permission still gets the statuses.
     async fn ci_status(&self, repo: &RepoId, reference: &str) -> HostResult<CiStatus> {
@@ -381,6 +408,38 @@ impl GitHost for GitHub {
             .and_then(|a| a.avatar_url)
             .filter(|url| !url.is_empty())
             .map(|url| sized(&url)))
+    }
+
+    async fn boards(&self, repo: &RepoId) -> HostResult<Vec<Board>> {
+        boards::boards(self, repo).await
+    }
+
+    async fn board(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        cursor: Option<&str>,
+    ) -> HostResult<BoardPage> {
+        boards::board(self, board, cursor).await
+    }
+
+    async fn move_board_item(
+        &self,
+        _repo: &RepoId,
+        board: &Board,
+        item: &BoardItem,
+        to: &BoardColumn,
+    ) -> HostResult<BoardItem> {
+        boards::move_item(self, board, item, to).await
+    }
+
+    async fn board_item(
+        &self,
+        _repo: &RepoId,
+        _board: &Board,
+        item: &BoardItem,
+    ) -> HostResult<BoardItem> {
+        boards::item_detail(self, item).await
     }
 }
 

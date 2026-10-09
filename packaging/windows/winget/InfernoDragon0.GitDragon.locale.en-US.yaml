@@ -1,0 +1,16 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.6.0.schema.json
+PackageIdentifier: InfernoDragon0.GitDragon
+PackageVersion: <VERSION>
+PackageLocale: en-US
+Publisher: InfernoDragon0
+PublisherUrl: https://github.com/InfernoDragon0
+PackageName: GitDragon
+PackageUrl: https://github.com/InfernoDragon0/GitDragon
+License: <LICENSE_SPDX_ID>  # TODO: decide the project licence first
+ShortDescription: A fast, native Git client built with Rust and GPUI.
+Tags:
+  - git
+  - gui
+  - version-control
+ManifestType: defaultLocale
+ManifestVersion: 1.6.0

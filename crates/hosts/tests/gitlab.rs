@@ -315,6 +315,30 @@ fn ci_status_by_sha_falls_back_to_pipeline() {
 }
 
 #[test]
+fn author_avatars() {
+    let (replay, gl) = setup(Duration::from_secs(60));
+    assert!(gl.supports(Feature::Avatars));
+    let avatar = |email: &str| block_on(gl.author_avatar(&repo(), "aaaa1111", email));
+    assert_eq!(
+        avatar("me@example.com").unwrap().as_deref(),
+        Some("https://secure.gravatar.com/avatar/abc123?s=64&d=identicon")
+    );
+    let url = format!("{API}/avatar?email=me%40example.com&size=64");
+    assert_eq!(replay.count(&url), 1);
+    assert_eq!(replay.seen()[0].auth, Some("PrivateToken"));
+
+    // Null, empty and plain-http answers are "no avatar", not errors.
+    assert_eq!(avatar("nobody@example.com").unwrap(), None);
+    assert_eq!(avatar("empty@example.com").unwrap(), None);
+    assert_eq!(avatar("plain@example.com").unwrap(), None);
+
+    // A second ask for the same email is served from the cache; the commit does not matter.
+    let again = block_on(gl.author_avatar(&repo(), "bbbb2222", "me@example.com")).unwrap();
+    assert!(again.is_some());
+    assert_eq!(replay.count(&url), 1, "cached");
+}
+
+#[test]
 fn self_managed_base_with_port_and_prefix() {
     let replay = Arc::new(Replay::new());
     replay.push(Route::new(
@@ -507,4 +531,42 @@ fn connect_picks_gitlab_and_auth_mode() {
         connect(&http, None, transport),
         Err(HostError::Config(_))
     ));
+}
+
+#[test]
+fn closing_and_reopening_an_issue_sends_a_state_event() {
+    let (replay, gl) = setup(Duration::ZERO);
+    assert!(gl.supports(Feature::CloseIssue));
+    let url = format!("{API}/projects/group%2Fsub%2Fproj/issues/7");
+    let issue = |state: &str| {
+        json!({
+            "iid": 7, "title": "Crash", "state": state,
+            "web_url": "https://gitlab.com/group/sub/proj/-/issues/7",
+            "created_at": "2026-10-09T10:00:00Z", "updated_at": "2026-10-09T12:00:00Z"
+        })
+    };
+    replay.push(Route::new("PUT", &url, 200, issue("closed")).once());
+    replay.push(Route::new("PUT", &url, 200, issue("opened")).once());
+
+    let closed = block_on(gl.set_issue_state(&repo(), 7, false)).unwrap();
+    assert_eq!(closed.state, IssueState::Closed);
+    let sent = replay.seen().pop().unwrap();
+    assert_eq!(sent.method, hosts::http::Method::Put);
+    assert_eq!(sent.body.unwrap(), json!({"state_event": "close"}));
+
+    let reopened = block_on(gl.set_issue_state(&repo(), 7, true)).unwrap();
+    assert_eq!(reopened.state, IssueState::Open);
+    assert_eq!(
+        replay.seen().pop().unwrap().body.unwrap(),
+        json!({"state_event": "reopen"})
+    );
+}
+
+#[test]
+fn merge_request_head_ref() {
+    let (_, gl) = setup(Duration::ZERO);
+    assert_eq!(
+        gl.pull_head_ref(9).as_deref(),
+        Some("merge-requests/9/head")
+    );
 }

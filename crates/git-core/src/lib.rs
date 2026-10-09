@@ -12,12 +12,15 @@ pub mod maintenance;
 pub mod ops;
 pub mod parse;
 pub mod patch;
+pub mod pr_ops;
 pub mod progress;
 pub mod redact;
 pub mod repo;
 pub mod runner;
 pub mod setup;
+pub mod signing;
 pub mod sync_ops;
+pub mod undo;
 pub mod watch;
 
 /// Read-only gix fast path (design: optional, behind the GitRepo trait). Not implemented yet.
@@ -35,3 +38,4 @@ pub use progress::Progress;
 pub use repo::{DiffTarget, GitRepo, LogQuery};
 pub use runner::{CommandLog, CommandRecord, GitCommand, GitOutput, GitRunner, GitStream, Mode};
 pub use sync_ops::{PullMode, PushOptions, Submodule, SubmoduleState};
+pub use undo::{HeadState, UndoAction};

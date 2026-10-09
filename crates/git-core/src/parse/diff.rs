@@ -1,6 +1,8 @@
 //! `git diff -p` parser to File / Hunk / Line. Hunk headers are kept verbatim so a hunk can be
 //! re-emitted as a patch for `git apply --cached` (hunk and line staging).
 
+use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
+
 use bstr::{BString, ByteSlice};
 
 use super::{ParseError, ParseResult, parse_uint};
@@ -19,6 +21,52 @@ pub const ARGS: &[&str] = &[
     "--src-prefix=a/",
     "--dst-prefix=b/",
 ];
+
+/// Fewest / most context lines around a hunk the view settings allow. Zero is excluded: a hunk
+/// with no context cannot be staged back with `git apply` without `--unidiff-zero`.
+pub const CONTEXT_RANGE: std::ops::RangeInclusive<u32> = 1..=20;
+
+static CONTEXT_LINES: AtomicU32 = AtomicU32::new(3);
+static IGNORE_WHITESPACE: AtomicBool = AtomicBool::new(false);
+
+/// How diffs are produced from now on (the Settings page): context lines around each hunk
+/// (clamped to [`CONTEXT_RANGE`]) and, for committed history only, whether whitespace changes
+/// are ignored (`-w`). Working-copy diffs never ignore whitespace: hunks staged from a `-w` diff
+/// would not apply to the file.
+pub fn set_view_options(context: u32, ignore_whitespace: bool) {
+    CONTEXT_LINES.store(clamp_context(context), Ordering::Relaxed);
+    IGNORE_WHITESPACE.store(ignore_whitespace, Ordering::Relaxed);
+}
+
+fn clamp_context(context: u32) -> u32 {
+    context.clamp(*CONTEXT_RANGE.start(), *CONTEXT_RANGE.end())
+}
+
+/// [`ARGS`] with the current view options; `committed` is true for diffs between commits.
+pub fn args(committed: bool) -> Vec<String> {
+    build_args(
+        CONTEXT_LINES.load(Ordering::Relaxed),
+        IGNORE_WHITESPACE.load(Ordering::Relaxed),
+        committed,
+    )
+}
+
+fn build_args(context: u32, ignore_whitespace: bool, committed: bool) -> Vec<String> {
+    let mut out: Vec<String> = ARGS
+        .iter()
+        .map(|a| {
+            if *a == "-U3" {
+                format!("-U{}", clamp_context(context))
+            } else {
+                (*a).to_string()
+            }
+        })
+        .collect();
+    if committed && ignore_whitespace {
+        out.push("-w".into());
+    }
+    out
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileChange {
@@ -453,4 +501,28 @@ fn hunk_header(line: &[u8]) -> Option<(u32, u32, u32, u32, BString)> {
     let (new_start, new_lines) = range(new)?;
     let section = BString::from(rest.strip_prefix(b" ").unwrap_or(rest));
     Some((old_start, old_lines, new_start, new_lines, section))
+}
+
+#[cfg(test)]
+mod option_tests {
+    use super::*;
+
+    #[test]
+    fn view_options_change_context_and_whitespace_only_where_safe() {
+        let default = build_args(3, false, true);
+        assert_eq!(
+            default,
+            ARGS.iter().map(|a| a.to_string()).collect::<Vec<_>>()
+        );
+
+        let wide = build_args(8, true, true);
+        assert!(wide.contains(&"-U8".to_string()) && !wide.contains(&"-U3".to_string()));
+        assert_eq!(wide.last().map(String::as_str), Some("-w"));
+
+        // Working-copy diffs keep whitespace: staged hunks must apply to the file.
+        assert!(!build_args(8, true, false).contains(&"-w".to_string()));
+        // Zero and huge contexts are clamped.
+        assert!(build_args(0, false, false).contains(&"-U1".to_string()));
+        assert!(build_args(500, false, false).contains(&"-U20".to_string()));
+    }
 }

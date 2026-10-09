@@ -94,7 +94,10 @@ impl Block {
     }
 
     fn write_markers(&self, out: &mut Vec<u8>) {
-        let eol: &[u8] = if [&self.ours, &self.theirs].iter().any(|t| t.ends_with(b"\r\n")) {
+        let eol: &[u8] = if [&self.ours, &self.theirs]
+            .iter()
+            .any(|t| t.ends_with(b"\r\n"))
+        {
             b"\r\n"
         } else {
             b"\n"
@@ -134,7 +137,7 @@ pub fn has_markers(text: &[u8]) -> bool {
 }
 
 /// `line` is `size` × `c` followed by end of line or a space (and a label).
-fn marker<'a>(line: &'a [u8], c: u8, size: usize) -> Option<&'a [u8]> {
+fn marker(line: &[u8], c: u8, size: usize) -> Option<&[u8]> {
     let rest = line.strip_prefix(&*vec![c; size])?;
     let body = trim_eol(rest);
     match body.first() {
@@ -257,14 +260,23 @@ mod tests {
         assert_eq!(block.ours, b"ours 1\nours 2\n");
         assert_eq!(block.theirs, b"theirs\n");
         assert_eq!(block.base, None);
-        assert_eq!((block.ours_label.as_str(), block.theirs_label.as_str()), ("HEAD", "feature"));
-        assert_eq!(text.resolve(&[Some(Choice::Ours)]), b"a\nours 1\nours 2\nz\n");
+        assert_eq!(
+            (block.ours_label.as_str(), block.theirs_label.as_str()),
+            ("HEAD", "feature")
+        );
+        assert_eq!(
+            text.resolve(&[Some(Choice::Ours)]),
+            b"a\nours 1\nours 2\nz\n"
+        );
         assert_eq!(text.resolve(&[Some(Choice::Theirs)]), b"a\ntheirs\nz\n");
         assert_eq!(
             text.resolve(&[Some(Choice::BothReversed)]),
             b"a\ntheirs\nours 1\nours 2\nz\n"
         );
-        assert_eq!(text.resolve(&[Some(Choice::Custom(b"x\n".to_vec()))]), b"a\nx\nz\n");
+        assert_eq!(
+            text.resolve(&[Some(Choice::Custom(b"x\n".to_vec()))]),
+            b"a\nx\nz\n"
+        );
         // Unresolved blocks are written back as they were.
         assert_eq!(text.resolve(&[]), MERGE);
     }
@@ -276,7 +288,10 @@ mod tests {
         assert_eq!(block.base.as_deref(), Some(&b"orig\r\n"[..]));
         assert_eq!(block.base_label.as_deref(), Some("base"));
         assert_eq!(text.resolve(&[Some(Choice::Base)]), b"orig\r\ntail");
-        assert_eq!(text.resolve(&[Some(Choice::Both)]), b"mine\r\nyours\r\ntail");
+        assert_eq!(
+            text.resolve(&[Some(Choice::Both)]),
+            b"mine\r\nyours\r\ntail"
+        );
         assert_eq!(text.resolve(&[None]), DIFF3);
     }
 

@@ -39,10 +39,45 @@ pub fn default_dir_name(url: &str) -> Option<String> {
 
 /// `git init` in `dir` (created if missing). Returns the worktree root.
 pub async fn init(runner: &GitRunner, dir: &Path) -> Result<PathBuf> {
+    init_with_branch(runner, dir, None).await
+}
+
+/// [`init`] with the first branch named `branch` (`--initial-branch`); `None` leaves it to
+/// `init.defaultBranch` / git's default. The name is checked like any branch name.
+pub async fn init_with_branch(
+    runner: &GitRunner,
+    dir: &Path,
+    branch: Option<&str>,
+) -> Result<PathBuf> {
+    let branch = branch.map(str::trim).filter(|b| !b.is_empty());
+    let mut cmd = GitCommand::write(dir).args(["init", "--quiet"]);
+    if let Some(branch) = branch {
+        crate::runner::validate_rev(branch).map_err(|_| GitError::InvalidArgument {
+            what: "branch name",
+            value: branch.to_string(),
+        })?;
+        // `check-ref-format` needs no repository; run it in the folder that exists already.
+        let probe_dir = dir
+            .ancestors()
+            .find(|d| d.is_dir())
+            .unwrap_or(Path::new("."));
+        let check = runner
+            .output(
+                GitCommand::read(probe_dir)
+                    .args(["check-ref-format", "--branch"])
+                    .arg(branch),
+            )
+            .await?;
+        if !check.success() {
+            return Err(GitError::InvalidArgument {
+                what: "branch name",
+                value: branch.to_string(),
+            });
+        }
+        cmd = cmd.arg(format!("--initial-branch={branch}"));
+    }
     std::fs::create_dir_all(dir)?;
-    runner
-        .run(GitCommand::write(dir).args(["init", "--quiet"]))
-        .await?;
+    runner.run(cmd).await?;
     Ok(dir.to_path_buf())
 }
 

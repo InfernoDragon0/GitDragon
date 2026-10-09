@@ -10,6 +10,7 @@ use super::SidebarPanel;
 use super::rows::{Row, Section};
 use crate::dialogs::{self, Field};
 use crate::repo_tab::RepoTab;
+use crate::undo::UndoPlan;
 
 #[derive(Debug, Clone)]
 enum Action {
@@ -33,6 +34,10 @@ enum Action {
         force: bool,
     },
     Pull(PullMode),
+    /// Merge a branch (local or `remote/branch`) into the current one.
+    Merge(String),
+    /// Rebase the current branch onto a branch.
+    Rebase(String),
     Fetch {
         remote: Option<String>,
         prune: bool,
@@ -103,10 +108,19 @@ pub(super) fn menu(
             ..
         } => {
             if !current {
-                menu = menu.item(item(
-                    format!("Checkout {name}"),
-                    Action::CheckoutLocal(name.clone()),
-                ));
+                menu = menu
+                    .item(item(
+                        format!("Checkout {name}"),
+                        Action::CheckoutLocal(name.clone()),
+                    ))
+                    .item(item(
+                        format!("Merge {name} into current branch"),
+                        Action::Merge(name.clone()),
+                    ))
+                    .item(item(
+                        format!("Rebase current branch onto {name}"),
+                        Action::Rebase(name.clone()),
+                    ));
             } else {
                 menu = menu
                     .item(item(
@@ -236,6 +250,14 @@ pub(super) fn menu(
                     Action::NewBranchFrom(oid.clone()),
                 ))
                 .item(item(
+                    format!("Merge {remote}/{branch} into current branch"),
+                    Action::Merge(format!("{remote}/{branch}")),
+                ))
+                .item(item(
+                    format!("Rebase current branch onto {remote}/{branch}"),
+                    Action::Rebase(format!("{remote}/{branch}")),
+                ))
+                .item(item(
                     "Copy name".into(),
                     Action::Copy(format!("{remote}/{branch}")),
                 ));
@@ -297,6 +319,17 @@ impl SidebarPanel {
     {
         if let Some(tab) = self.tab() {
             tab.update(cx, |tab, cx| tab.run_op(label, cx, op));
+        }
+    }
+
+    /// [`Self::op`] for operations the reflog can take back (offers an Undo afterwards).
+    fn op_undoable<F, Fut>(&self, label: String, plan: UndoPlan, cx: &mut Context<Self>, op: F)
+    where
+        F: FnOnce(git_core::CliRepo) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = git_core::Result<()>> + Send + 'static,
+    {
+        if let Some(tab) = self.tab() {
+            tab.update(cx, |tab, cx| tab.run_op_undoable(label, plan, cx, op));
         }
     }
 
@@ -426,9 +459,12 @@ impl SidebarPanel {
                     move |_, cx| {
                         let name = name.clone();
                         _ = this.update(cx, |view, cx| {
-                            view.op(format!("Deleting {name}"), cx, move |repo| async move {
-                                repo.delete_branch(&name, force).await
-                            })
+                            view.op_undoable(
+                                format!("Deleting {name}"),
+                                UndoPlan::Branch(name.clone()),
+                                cx,
+                                move |repo| async move { repo.delete_branch(&name, force).await },
+                            )
                         });
                     },
                 );
@@ -480,9 +516,22 @@ impl SidebarPanel {
                     },
                 );
             }
-            Action::Pull(mode) => self.op("Pulling".into(), cx, move |repo| async move {
-                repo.pull(mode).await
-            }),
+            Action::Pull(mode) => self.op_undoable(
+                "Pulling".into(),
+                UndoPlan::Head,
+                cx,
+                move |repo| async move { repo.pull(mode).await },
+            ),
+            Action::Merge(rev) => {
+                if let Some(tab) = self.tab() {
+                    tab.update(cx, |tab, cx| tab.merge_branch(rev, cx));
+                }
+            }
+            Action::Rebase(rev) => {
+                if let Some(tab) = self.tab() {
+                    tab.update(cx, |tab, cx| tab.rebase_onto(rev, cx));
+                }
+            }
             Action::Fetch { remote, prune } => {
                 let label = match &remote {
                     Some(remote) => format!("Fetching {remote}"),

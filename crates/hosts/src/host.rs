@@ -5,6 +5,7 @@ use accounts::HostKind;
 use async_trait::async_trait;
 
 use crate::api::RateLimit;
+use crate::boards::{Board, BoardColumn, BoardItem, BoardPage};
 use crate::error::HostError;
 use crate::model::*;
 use crate::remote::RepoId;
@@ -26,6 +27,12 @@ pub trait GitHost: Send + Sync {
 
     /// Browser link for `target`; `None` when the host has no such page.
     fn web_url(&self, repo: &RepoId, target: &WebTarget) -> Option<String>;
+
+    /// The ref (on the remote the repo was cloned from) that holds the head of pull request
+    /// `number`, fetchable even for forks; `None` when the host has no such refs.
+    fn pull_head_ref(&self, _number: u64) -> Option<String> {
+        None
+    }
 
     /// Last known API quota.
     fn rate_limit(&self) -> RateLimit {
@@ -81,6 +88,16 @@ pub trait GitHost: Send + Sync {
         Err(HostError::Unsupported(Feature::IssueComments))
     }
 
+    /// Closes (`open` false) or reopens an issue; answers the updated issue.
+    async fn set_issue_state(
+        &self,
+        _repo: &RepoId,
+        _number: u64,
+        _open: bool,
+    ) -> HostResult<Issue> {
+        Err(HostError::Unsupported(Feature::CloseIssue))
+    }
+
     /// Combined CI state of a commit or branch.
     async fn ci_status(&self, _repo: &RepoId, _reference: &str) -> HostResult<CiStatus> {
         Err(HostError::Unsupported(Feature::CiStatus))
@@ -96,5 +113,42 @@ pub trait GitHost: Send + Sync {
         _email: &str,
     ) -> HostResult<Option<String>> {
         Err(HostError::Unsupported(Feature::Avatars))
+    }
+
+    /// Boards for `repo`: the ones linked to it first ([`crate::BoardScope::Repo`]), then
+    /// those of its organisation / group / project.
+    async fn boards(&self, _repo: &RepoId) -> HostResult<Vec<Board>> {
+        Err(HostError::Unsupported(Feature::Boards))
+    }
+
+    /// One page of `board`'s items with its columns; `cursor` is the previous page's `next`.
+    async fn board(
+        &self,
+        _repo: &RepoId,
+        _board: &Board,
+        _cursor: Option<&str>,
+    ) -> HostResult<BoardPage> {
+        Err(HostError::Unsupported(Feature::Boards))
+    }
+
+    /// Moves `item` into column `to`; answers the item as it is now.
+    async fn move_board_item(
+        &self,
+        _repo: &RepoId,
+        _board: &Board,
+        _item: &BoardItem,
+        _to: &BoardColumn,
+    ) -> HostResult<BoardItem> {
+        Err(HostError::Unsupported(Feature::Boards))
+    }
+
+    /// `item` with what the board listing leaves out (linked branches, merge requests).
+    async fn board_item(
+        &self,
+        _repo: &RepoId,
+        _board: &Board,
+        _item: &BoardItem,
+    ) -> HostResult<BoardItem> {
+        Err(HostError::Unsupported(Feature::Boards))
     }
 }

@@ -456,6 +456,27 @@ fn ci_status_by_commit_filters_on_source_version() {
 }
 
 #[test]
+fn avatars_are_unsupported_because_they_need_credentials() {
+    let (replay, az) = setup(false, Duration::ZERO);
+    // The imageUrl Azure reports sits on the org's own origin and answers 401 anonymously.
+    let author = block_on(az.pull_requests(&repo(), &ListQuery::default()))
+        .unwrap()
+        .items[0]
+        .author
+        .clone()
+        .unwrap();
+    assert!(author.avatar_url.unwrap().contains("MemberAvatars"));
+
+    assert!(!az.supports(Feature::Avatars));
+    let calls = replay.seen().len();
+    assert_eq!(
+        block_on(az.author_avatar(&repo(), SHA_A, "inferno@example.com")).unwrap_err(),
+        HostError::Unsupported(Feature::Avatars)
+    );
+    assert_eq!(replay.seen().len(), calls, "nothing sent");
+}
+
+#[test]
 fn spaces_in_names_are_encoded() {
     let (replay, az) = setup(false, Duration::ZERO);
     let id = spaced();
@@ -717,4 +738,73 @@ fn connect_builds_the_provider() {
     .err()
     .unwrap();
     assert!(matches!(err, HostError::Config(_)));
+}
+
+#[test]
+fn closing_a_work_item_tries_the_process_states() {
+    let (replay, az) = setup(false, Duration::ZERO);
+    assert!(az.supports(Feature::CloseIssue));
+    let url = format!("{ORG}/GitDragon/_apis/wit/workitems/12?api-version=7.1");
+    let item = |state: &str| {
+        json!({
+            "id": 12,
+            "fields": {
+                "System.Title": "Crash", "System.State": state,
+                "System.CreatedDate": "2026-10-09T10:00:00Z",
+                "System.ChangedDate": "2026-10-09T12:00:00Z"
+            }
+        })
+    };
+    // A Basic-process project has no "Closed" state: 400, then "Done" is accepted.
+    replay.push(
+        Route::new(
+            "PATCH",
+            &url,
+            400,
+            json!({"message": "invalid state Closed"}),
+        )
+        .once(),
+    );
+    replay.push(Route::new("PATCH", &url, 200, item("Done")).once());
+
+    let closed = block_on(az.set_issue_state(&repo(), 12, false)).unwrap();
+    assert_eq!(closed.state, IssueState::Closed);
+    let sent: Vec<_> = replay
+        .seen()
+        .into_iter()
+        .filter(|s| s.method == Method::Patch)
+        .collect();
+    assert_eq!(sent.len(), 2);
+    assert_eq!(
+        sent[0].header("content-type"),
+        Some("application/json-patch+json")
+    );
+    assert_eq!(
+        sent[0].body.clone().unwrap(),
+        json!([{"op": "add", "path": "/fields/System.State", "value": "Closed"}])
+    );
+    assert_eq!(
+        sent[1].body.clone().unwrap(),
+        json!([{"op": "add", "path": "/fields/System.State", "value": "Done"}])
+    );
+
+    // Reopening: "Active" is accepted at once.
+    replay.push(Route::new("PATCH", &url, 200, item("Active")).once());
+    let reopened = block_on(az.set_issue_state(&repo(), 12, true)).unwrap();
+    assert_eq!(reopened.state, IssueState::Open);
+    assert_eq!(
+        replay.seen().pop().unwrap().body.unwrap(),
+        json!([{"op": "add", "path": "/fields/System.State", "value": "Active"}])
+    );
+
+    // Any other failure is not retried with another name.
+    replay.push(Route::new("PATCH", &url, 403, json!({"message": "no"})).once());
+    let err = block_on(az.set_issue_state(&repo(), 12, false)).unwrap_err();
+    assert!(matches!(err, HostError::Forbidden { .. }));
+}
+
+#[test]
+fn azure_has_no_head_refs_to_fetch() {
+    let (_, az) = setup(false, Duration::ZERO);
+    assert_eq!(az.pull_head_ref(9), None);
 }

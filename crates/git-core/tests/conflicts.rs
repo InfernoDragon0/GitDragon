@@ -83,7 +83,9 @@ fn merge_conflict_resolve_and_continue() {
     let d = dir.path();
     // Stopping for conflicts is not an error.
     block(repo.merge("feature", MergeMode::Default)).unwrap();
-    let state = block(repo.in_progress()).unwrap().expect("merge in progress");
+    let state = block(repo.in_progress())
+        .unwrap()
+        .expect("merge in progress");
     assert_eq!(state.op, Operation::Merge);
     assert_eq!(state.message.as_deref(), Some("Merge branch 'feature'"));
     let mut files = conflicts_of(&repo);
@@ -117,7 +119,10 @@ fn merge_conflict_resolve_and_continue() {
     assert_eq!(read(d, "f.txt"), "one\nTWO (main)\nTWO (feature)\nthree\n");
     let parents = git(d, &["log", "-1", "--format=%P"]);
     assert_eq!(parents.split_whitespace().count(), 2, "a merge commit");
-    assert_eq!(git(d, &["log", "-1", "--format=%s"]).trim(), "Merge branch 'feature'");
+    assert_eq!(
+        git(d, &["log", "-1", "--format=%s"]).trim(),
+        "Merge branch 'feature'"
+    );
 }
 
 #[test]
@@ -141,7 +146,9 @@ fn rebase_conflict_take_side_and_continue() {
     let d = dir.path();
     git(d, &["switch", "-q", "feature"]);
     block(repo.rebase("main")).unwrap();
-    let state = block(repo.in_progress()).unwrap().expect("rebase in progress");
+    let state = block(repo.in_progress())
+        .unwrap()
+        .expect("rebase in progress");
     assert_eq!(state.op, Operation::Rebase);
     assert_eq!(state.branch.as_deref(), Some("feature"));
     assert_eq!(state.step, Some((1, 1)));
@@ -216,7 +223,10 @@ fn interactive_rebase_reorders_rewords_squashes_and_drops() {
     let log = git(d, &["log", "--format=%s", &format!("{base}..HEAD")]);
     assert_eq!(log.lines().collect::<Vec<_>>(), ["a", "C, reworded"]);
     let body = git(d, &["log", "-1", "--format=%B", "HEAD~1"]);
-    assert_eq!(body.trim(), "C, reworded\n\nwith a body; $(not run) 'quoted'");
+    assert_eq!(
+        body.trim(),
+        "C, reworded\n\nwith a body; $(not run) 'quoted'"
+    );
     assert!(!d.join("b.txt").exists(), "dropped");
     assert!(d.join("d.txt").exists(), "fixed up into a");
 }

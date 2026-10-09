@@ -15,6 +15,7 @@ use ui::{Palette, zoomed};
 
 use crate::dialogs::{self, Field};
 use crate::repo_tab::RepoTab;
+use crate::undo::UndoPlan;
 
 pub struct RepoToolbar {
     repo: Option<Entity<RepoTab>>,
@@ -110,15 +111,34 @@ impl RepoToolbar {
         }
     }
 
-    fn pull(&mut self, mode: PullMode, cx: &mut Context<Self>) {
-        self.op("Pulling".into(), cx, move |repo| async move {
-            repo.pull(mode).await
+    pub fn pull(&mut self, mode: PullMode, cx: &mut Context<Self>) {
+        if let Some(tab) = &self.repo {
+            tab.update(cx, |tab, cx| {
+                tab.run_op_undoable("Pulling", UndoPlan::Head, cx, move |repo| async move {
+                    repo.pull(mode).await
+                })
+            });
+        }
+    }
+
+    /// Fetch all remotes (`--prune` per Settings).
+    pub fn fetch(&mut self, cx: &mut Context<Self>) {
+        let prune = crate::prefs::get(cx).prune_on_fetch;
+        self.op("Fetching all remotes".into(), cx, move |repo| async move {
+            repo.fetch(None, prune).await
+        });
+    }
+
+    /// Pop the latest stash.
+    pub fn pop_stash(&mut self, cx: &mut Context<Self>) {
+        self.op("Popping stash@{0}".into(), cx, |repo| async move {
+            repo.stash_action(StashAction::Pop, 0).await
         });
     }
 
     /// Pushes the current branch; with no upstream yet, to `origin` (or the first remote),
     /// setting the upstream.
-    fn push(&mut self, cx: &mut Context<Self>) {
+    pub fn push(&mut self, cx: &mut Context<Self>) {
         let Some(head) = self.head(cx) else {
             return;
         };
@@ -152,7 +172,7 @@ impl RepoToolbar {
         );
     }
 
-    fn new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn new_branch(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         self.dialog_sub = Some(dialogs::prompt(
             window,
@@ -171,7 +191,7 @@ impl RepoToolbar {
         ));
     }
 
-    fn stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+    pub fn stash(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let this = cx.entity().downgrade();
         self.dialog_sub = Some(dialogs::prompt(
             window,
@@ -223,6 +243,7 @@ impl Render for RepoToolbar {
         } else {
             "Push".into()
         };
+        let pull_pref = crate::prefs::get(cx).pull;
         let this = cx.entity().downgrade();
         let pull_menu = Button::new("toolbar-pull-mode")
             .ghost()
@@ -257,11 +278,7 @@ impl Render for RepoToolbar {
                     .label("Fetch")
                     .tooltip("Fetch all remotes")
                     .disabled(busy)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.op("Fetching all remotes".into(), cx, |repo| async move {
-                            repo.fetch(None, false).await
-                        })
-                    })),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.fetch(cx))),
             )
             .child(
                 h_flex()
@@ -271,10 +288,14 @@ impl Render for RepoToolbar {
                             .small()
                             .icon(IconName::Download)
                             .label(pull_label)
-                            .tooltip("Pull the current branch (per git config)")
+                            .tooltip(format!(
+                                "Pull the current branch ({}; change under Settings > Pull & push)",
+                                pull_pref.label().to_lowercase()
+                            ))
                             .disabled(busy || !head.upstream)
                             .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                                this.pull(PullMode::Config, cx)
+                                let mode = crate::prefs::get(cx).pull.mode();
+                                this.pull(mode, cx)
                             })),
                     )
                     .child(pull_menu),
@@ -324,11 +345,7 @@ impl Render for RepoToolbar {
                     .label("Pop")
                     .tooltip("Apply and drop the latest stash")
                     .disabled(busy || head.stashes == 0)
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.op("Popping stash@{0}".into(), cx, |repo| async move {
-                            repo.stash_action(StashAction::Pop, 0).await
-                        })
-                    })),
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.pop_stash(cx))),
             )
             .when(
                 head.lfs.as_ref().is_some_and(|l| l.used && !l.missing()),

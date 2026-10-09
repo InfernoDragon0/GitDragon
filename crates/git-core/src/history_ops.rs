@@ -175,7 +175,7 @@ impl CliRepo {
         }
         let cmd = GitCommand::read(self.root())
             .arg("diff")
-            .args(crate::parse::diff::ARGS)
+            .args(crate::parse::diff::args(true))
             .arg("--end-of-options")
             .rev(&base)?
             .rev(id)?

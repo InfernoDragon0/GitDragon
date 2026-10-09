@@ -1,15 +1,17 @@
 //! Hosting providers behind one [`GitHost`] trait (design "Hosting providers"): the UI asks
 //! the trait, a host that lacks a feature answers [`HostError::Unsupported`] and the UI hides
-//! it. No provider-specific code paths outside [`github`] and [`gitlab`].
+//! it. Provider-specific code lives only in its own module ([`github`], [`gitlab`], [`azure`]).
 //!
 //! - [`remote`]: remote URL (https / ssh / scp) to a [`RepoId`].
 //! - [`http`]: the transport (TLS always verified, credentials never cross origins).
 //! - [`api`]: per-endpoint cache with TTL + ETag / Last-Modified, rate limits, error mapping.
 //! - [`poll`]: refresh scheduling (focus, back-off, rate-limit windows).
 //! - [`replay`]: recorded responses for tests.
+//! - [`boards`]: the board model (GitHub Projects, GitLab issue boards, Azure Boards).
 
 pub mod api;
 pub mod azure;
+pub mod boards;
 pub mod error;
 pub mod github;
 pub mod gitlab;
@@ -26,6 +28,7 @@ use accounts::{Account, AuthMode, HostKind, Secret};
 
 pub use api::{ApiClient, RateLimit};
 pub use azure::AzureDevOps;
+pub use boards::*;
 pub use error::HostError;
 pub use github::GitHub;
 pub use gitlab::GitLab;

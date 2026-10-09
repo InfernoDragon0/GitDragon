@@ -1,23 +1,38 @@
 //! GitDragon desktop app entry point.
 
+// Release builds are GUI-only on Windows (no console window); debug keeps the console for logs.
+#![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
+
 mod accounts;
 mod actions;
 mod avatars;
+mod boards;
 mod changes;
+mod chat;
 mod clone_dialog;
+mod conflicts;
 mod dialogs;
 mod drag_scroll;
+mod empty;
+mod file_editor;
 mod graph;
 mod hosted;
+mod hosts;
 mod op_strip;
+mod palette;
 mod panels;
+mod prefs;
 mod rail;
 mod repo_tab;
 mod settings;
+mod settings_cards;
+mod settings_find;
 mod sidebar;
 mod startup;
 mod state;
+mod toast;
 mod toolbar;
+mod undo;
 mod welcome;
 mod workspace;
 
@@ -68,6 +83,7 @@ fn main() {
         actions::bind_keys(cx);
         accounts::init(cx);
         avatars::init(saved.gravatar.unwrap_or(false), cx);
+        prefs::init(saved.prefs.clone(), cx);
         startup::mark("accounts");
 
         cx.on_action(|_: &Quit, cx| cx.quit());

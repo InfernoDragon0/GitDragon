@@ -13,6 +13,9 @@ pub enum HostError {
     Unauthorized { host: String },
     #[error("{host} refused access: {message}")]
     Forbidden { host: String, message: String },
+    /// The token lacks a permission (OAuth scope) the call needs; signing in again grants it.
+    #[error("{host} needs the `{scope}` permission for this; sign in again to grant it")]
+    MissingScope { host: String, scope: String },
     #[error("not found on {host} (or this account has no access)")]
     NotFound { host: String },
     #[error("{host} rate limit reached; {}", retry_hint(*.until))]

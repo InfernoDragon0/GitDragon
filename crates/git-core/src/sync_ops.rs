@@ -100,7 +100,7 @@ impl CliRepo {
 
     // ---- remotes ----------------------------------------------------------------------------
 
-    async fn check_remote_name(&self, name: &str) -> Result<String> {
+    pub(crate) async fn check_remote_name(&self, name: &str) -> Result<String> {
         let name = name.trim();
         let invalid = || GitError::InvalidArgument {
             what: "remote name",
@@ -161,10 +161,7 @@ impl CliRepo {
 
     /// `git fetch <remote>`, or every remote with `None`; `prune` drops deleted branches.
     pub async fn fetch(&self, remote: Option<&str>, prune: bool) -> Result<()> {
-        let mut cmd = self.sync_cmd().args(["fetch", "--no-progress"]);
-        if prune {
-            cmd = cmd.arg("--prune");
-        }
+        let cmd = fetch_command(self.sync_cmd(), prune);
         let cmd = match remote {
             Some(remote) => {
                 let remote = self.check_remote_name(remote).await?;
@@ -177,13 +174,7 @@ impl CliRepo {
 
     /// Pulls the current branch's upstream.
     pub async fn pull(&self, mode: PullMode) -> Result<()> {
-        let mut cmd = self.sync_cmd().args(["pull", "--no-progress"]);
-        cmd = match mode {
-            PullMode::Config => cmd,
-            PullMode::Merge => cmd.arg("--no-rebase"),
-            PullMode::Rebase => cmd.arg("--rebase"),
-            PullMode::FastForwardOnly => cmd.arg("--ff-only"),
-        };
+        let cmd = pull_command(self.sync_cmd(), mode);
         // A merge / rebase that stops for conflicts continues in the Conflicts view.
         self.run_may_stop(cmd.env("GIT_EDITOR", ":")).await
     }
@@ -249,6 +240,35 @@ impl CliRepo {
     }
 }
 
+/// `git fetch --no-progress [--prune]`, before the remote (or `--all`).
+fn fetch_command(cmd: GitCommand, prune: bool) -> GitCommand {
+    let cmd = cmd.args(["fetch", "--no-progress"]);
+    if prune { cmd.arg("--prune") } else { cmd }
+}
+
+/// `git pull --no-progress [mode flag]`.
+fn pull_command(cmd: GitCommand, mode: PullMode) -> GitCommand {
+    let cmd = cmd.args(["pull", "--no-progress"]);
+    match mode {
+        PullMode::Config => cmd,
+        PullMode::Merge => cmd.arg("--no-rebase"),
+        PullMode::Rebase => cmd.arg("--rebase"),
+        PullMode::FastForwardOnly => cmd.arg("--ff-only"),
+    }
+}
+
+/// The command line `fetch(None, prune)` runs, for previews.
+pub fn fetch_all_preview(prune: bool) -> String {
+    fetch_command(GitCommand::read("."), prune)
+        .arg("--all")
+        .display()
+}
+
+/// The command line `pull(mode)` runs, for previews.
+pub fn pull_preview(mode: PullMode) -> String {
+    pull_command(GitCommand::read("."), mode).display()
+}
+
 /// ` <oid> <path> (<describe>)` per line, first column `-` / `+` / `U` / space.
 pub fn parse_submodules(output: &[u8]) -> Vec<Submodule> {
     output
@@ -279,6 +299,24 @@ pub fn parse_submodules(output: &[u8]) -> Vec<Submodule> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn previews_match_the_commands() {
+        assert_eq!(fetch_all_preview(false), "git fetch --no-progress --all");
+        assert_eq!(
+            fetch_all_preview(true),
+            "git fetch --no-progress --prune --all"
+        );
+        assert_eq!(pull_preview(PullMode::Config), "git pull --no-progress");
+        assert_eq!(
+            pull_preview(PullMode::Rebase),
+            "git pull --no-progress --rebase"
+        );
+        assert_eq!(
+            pull_preview(PullMode::FastForwardOnly),
+            "git pull --no-progress --ff-only"
+        );
+    }
 
     #[test]
     fn submodule_status_lines() {

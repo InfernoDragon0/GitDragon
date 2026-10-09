@@ -111,11 +111,13 @@ impl GitRepo for CliRepo {
 
     async fn diff(&self, target: DiffTarget) -> Result<Vec<FileDiff>> {
         let cmd = match &target {
-            DiffTarget::Unstaged { paths } => self.read().arg("diff").args(diff::ARGS).paths(paths),
+            DiffTarget::Unstaged { paths } => {
+                self.read().arg("diff").args(diff::args(false)).paths(paths)
+            }
             DiffTarget::Staged { paths } => self
                 .read()
                 .args(["diff", "--cached"])
-                .args(diff::ARGS)
+                .args(diff::args(false))
                 .paths(paths),
             DiffTarget::Commit { id } => {
                 // First parent, or the empty tree for a root commit.
@@ -132,7 +134,7 @@ impl GitRepo for CliRepo {
                 let base = ids.next().unwrap_or(EMPTY_TREE).to_string();
                 self.read()
                     .arg("diff")
-                    .args(diff::ARGS)
+                    .args(diff::args(true))
                     .arg("--end-of-options")
                     .rev(&base)?
                     .rev(id)?
@@ -141,7 +143,7 @@ impl GitRepo for CliRepo {
             DiffTarget::Range { from, to } => self
                 .read()
                 .arg("diff")
-                .args(diff::ARGS)
+                .args(diff::args(true))
                 .arg("--end-of-options")
                 .rev(from)?
                 .rev(to)?

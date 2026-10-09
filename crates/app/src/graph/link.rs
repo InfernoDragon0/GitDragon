@@ -1,12 +1,14 @@
 //! What ties the Graph view (centre) to the Details panel (right dock): the selected commit of
-//! the active tab, and requests the details panel sends back (open a file's diff, jump to a
-//! parent).
+//! the active tab, and requests the details panel sends back (open a file's diff, open a WIP
+//! file's staging diff, jump to a parent).
 
 use std::sync::Arc;
 
+use bstr::BString;
 use git_core::parse::diff::FileDiff;
 use gpui_kit::{Context, EventEmitter, WeakEntity};
 
+use crate::changes::Section;
 use crate::repo_tab::RepoTab;
 
 #[derive(Default)]
@@ -23,6 +25,12 @@ pub enum LinkEvent {
         tab: WeakEntity<RepoTab>,
         commit: String,
         file: Arc<FileDiff>,
+    },
+    /// Show the staging diff of a working-copy file (the WIP row's) in place of the graph.
+    ShowWorkingFile {
+        tab: WeakEntity<RepoTab>,
+        section: Section,
+        path: BString,
     },
     /// Select (and scroll to) `commit` in the graph.
     Select {

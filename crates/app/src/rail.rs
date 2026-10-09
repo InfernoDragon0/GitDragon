@@ -9,6 +9,7 @@ use gpui_kit::{
     RenderOnce, SharedString, StatefulInteractiveElement as _, Styled as _, Window, div,
     prelude::FluentBuilder as _, px,
 };
+use hosts::HostVocab;
 use ui::Palette;
 
 use crate::actions::*;
@@ -22,7 +23,6 @@ const ACTIVE_BAR: f32 = 3.;
 pub enum View {
     #[default]
     Graph,
-    Changes,
     Conflicts,
     PullRequests,
     Issues,
@@ -32,9 +32,8 @@ pub enum View {
 }
 
 impl View {
-    pub const TOP: [View; 6] = [
+    pub const TOP: [View; 5] = [
         View::Graph,
-        View::Changes,
         View::Conflicts,
         View::PullRequests,
         View::Issues,
@@ -45,7 +44,6 @@ impl View {
     pub fn label(self) -> &'static str {
         match self {
             View::Graph => "Graph",
-            View::Changes => "Changes",
             View::Conflicts => "Conflicts",
             View::PullRequests => "Pull requests",
             View::Issues => "Issues",
@@ -58,7 +56,6 @@ impl View {
     pub fn icon(self) -> IconName {
         match self {
             View::Graph => IconName::GitGraph,
-            View::Changes => IconName::FileDiff,
             View::Conflicts => IconName::GitMergeConflict,
             View::PullRequests => IconName::GitPullRequest,
             View::Issues => IconName::CircleDot,
@@ -69,10 +66,19 @@ impl View {
     }
 
     /// The action that shows this view; the tooltip reads its key binding.
+    /// The tooltip: the view's name, in the active repository's host words where it has them
+    /// (GitLab "Merge requests", Azure "Work items").
+    pub fn tooltip(self, vocab: Option<&HostVocab>) -> &'static str {
+        match (self, vocab) {
+            (View::PullRequests, Some(v)) => v.pull_requests,
+            (View::Issues, Some(v)) => v.issues,
+            _ => self.label(),
+        }
+    }
+
     pub fn action(self) -> Box<dyn Action> {
         match self {
             View::Graph => Box::new(ShowGraph),
-            View::Changes => Box::new(ShowChanges),
             View::Conflicts => Box::new(ShowConflicts),
             View::PullRequests => Box::new(ShowPullRequests),
             View::Issues => Box::new(ShowIssues),
@@ -90,6 +96,7 @@ type OnSelect = std::rc::Rc<dyn Fn(View, &mut Window, &mut App)>;
 pub struct ActivityRail {
     active: View,
     badges: Vec<(View, usize)>,
+    vocab: Option<&'static HostVocab>,
     on_select: OnSelect,
 }
 
@@ -98,12 +105,19 @@ impl ActivityRail {
         Self {
             active,
             badges: Vec::new(),
+            vocab: None,
             on_select: std::rc::Rc::new(on_select),
         }
     }
 
+    /// The active repository's host words for the tooltips.
+    pub fn vocab(mut self, vocab: Option<&'static HostVocab>) -> Self {
+        self.vocab = vocab;
+        self
+    }
+
     /// Count shown on a view's icon; 0 hides it.
-    #[allow(dead_code, reason = "fed by the Changes / PRs cards")]
+    #[allow(dead_code, reason = "fed by the PRs / issues cards")]
     pub fn badge(mut self, view: View, count: usize) -> Self {
         self.badges.push((view, count));
         self
@@ -117,7 +131,7 @@ impl ActivityRail {
             .find(|(v, _)| *v == view)
             .map_or(0, |(_, n)| *n);
         let on_select = self.on_select.clone();
-        let label = SharedString::from(view.label());
+        let label = SharedString::from(view.tooltip(self.vocab));
 
         div()
             .id(ElementId::Name(SharedString::from(format!(
@@ -180,5 +194,23 @@ impl RenderOnce for ActivityRail {
             .children(View::TOP.map(|v| self.item(v, &palette)))
             .child(div().flex_1())
             .children(View::BOTTOM.map(|v| self.item(v, &palette)))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn tooltips_use_the_host_vocabulary() {
+        assert_eq!(View::PullRequests.tooltip(None), "Pull requests");
+        assert_eq!(
+            View::PullRequests.tooltip(Some(&HostVocab::GITLAB)),
+            "Merge requests"
+        );
+        assert_eq!(View::Issues.tooltip(Some(&HostVocab::GITHUB)), "Issues");
+        assert_eq!(View::Graph.tooltip(Some(&HostVocab::GITLAB)), "Graph");
+        let azure = HostVocab::AZURE_DEVOPS;
+        assert_eq!(View::Issues.tooltip(Some(&azure)), azure.issues);
     }
 }

@@ -19,6 +19,8 @@ allow = [
     "Unicode-3.0",
     "BSL-1.0",
     "bzip2-1.0.6",
+    # webpki-roots (Mozilla CA bundle, via reqwest/rustls): permissive data licence.
+    "CDLA-Permissive-2.0",
 ]
 confidence-threshold = 0.9
 
@@ -43,9 +45,13 @@ wildcards = "deny"
 allow-wildcard-paths = true
 
 [sources]
+# crates.io only. Any git dependency must be added to `allow-git` with a pinned rev (none today).
 unknown-registry = "deny"
 unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []
 
 [advisories]
 # Unmaintained notices for deep GPUI deps are not actionable here; vulnerabilities still fail.
 unmaintained = "none"
+yanked = "deny"

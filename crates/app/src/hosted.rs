@@ -12,7 +12,8 @@ use git_core::parse::refs::Remote;
 use gpui_kit::App;
 use hosts::host::HostResult;
 use hosts::{
-    Feature, GitHost, HostError, HttpTransport, RateLimit, RepoId, Transport, account_for, connect,
+    Feature, GitHost, HostError, HostVocab, HttpTransport, RateLimit, RepoId, Transport,
+    account_for, connect,
 };
 
 use crate::repo_tab::RepoTab;
@@ -38,11 +39,31 @@ pub enum Lookup {
     Later(Duration),
 }
 
+/// A connection to the repo's hosting service, for the pull request and issue panels.
+#[derive(Clone)]
+pub struct Session {
+    pub host: Arc<dyn GitHost>,
+    pub repo: RepoId,
+    /// The git remote the account matched (fetch and push go there).
+    pub remote: String,
+}
+
+/// What [`HostedRepo::resolve`] found.
+pub enum Resolution {
+    Ready(Session),
+    NoRemote,
+    /// A hosted remote exists but no account is signed in for it.
+    NoAccount(RepoId),
+    /// The account is a plain git server: no API.
+    NoApi(&'static str),
+    Failed(String),
+}
+
 /// The hosting side of one repo: where its remotes point and which accounts exist.
 #[derive(Clone)]
 pub struct HostedRepo {
-    /// Remote URLs, origin first.
-    remotes: Arc<[String]>,
+    /// `(name, fetch URL)` of the remotes, origin first.
+    remotes: Arc<[(String, String)]>,
     accounts: Arc<Accounts>,
 }
 
@@ -50,17 +71,59 @@ impl HostedRepo {
     /// `None` when there are no accounts or the repo has no remote.
     pub fn of_tab(tab: &RepoTab, cx: &App) -> Option<Self> {
         let accounts = crate::accounts::accounts(cx)?;
-        let remotes = remote_urls(&tab.remotes);
+        let remotes = ordered_remotes(&tab.remotes);
         (!remotes.is_empty()).then(|| Self {
             remotes: remotes.into(),
             accounts,
         })
     }
 
+    /// Finds the host for the first remote some account is signed in for. Blocks on the
+    /// keychain: call it off the UI thread.
+    pub fn resolve(&self) -> Resolution {
+        let accounts = self.accounts.list();
+        let mut first = None;
+        for (name, url) in self.remotes.iter() {
+            let Some(repo) = RepoId::parse(url) else {
+                continue;
+            };
+            let Some(account) = account_for(&accounts, &repo) else {
+                first.get_or_insert(repo);
+                continue;
+            };
+            return match self.host_checked(account) {
+                Ok(host) => Resolution::Ready(Session {
+                    host,
+                    repo,
+                    remote: name.clone(),
+                }),
+                Err(HostError::Unsupported(_)) => {
+                    Resolution::NoApi(HostVocab::of(account.kind).service)
+                }
+                Err(err) => Resolution::Failed(err.to_string()),
+            };
+        }
+        match first {
+            Some(repo) => Resolution::NoAccount(repo),
+            None => Resolution::NoRemote,
+        }
+    }
+
+    /// The words of the repo's host (GitLab: "Merge requests"); from the matching account, else
+    /// from the remote's host name. No blocking.
+    pub fn vocab(&self) -> Option<&'static HostVocab> {
+        let accounts = self.accounts.list();
+        self.remotes.iter().find_map(|(_, url)| {
+            let repo = RepoId::parse(url)?;
+            let kind = account_for(&accounts, &repo).map_or_else(|| repo.kind(), |a| a.kind);
+            Some(HostVocab::of(kind))
+        })
+    }
+
     /// The account and repo of the first remote some account is signed in for.
     fn target(&self) -> Option<(Account, RepoId)> {
         let accounts = self.accounts.list();
-        self.remotes.iter().find_map(|url| {
+        self.remotes.iter().find_map(|(_, url)| {
             let repo = RepoId::parse(url)?;
             let account = account_for(&accounts, &repo)?.clone();
             Some((account, repo))
@@ -91,8 +154,15 @@ impl HostedRepo {
         classify(host.author_avatar(&repo, commit, email).await)
     }
 
-    /// One host per account, shared by all repos: they share the token and so the quota.
+    /// [`Self::host_checked`] for the avatar lookups, which only log why there is none.
     fn host(&self, account: &Account) -> Option<Arc<dyn GitHost>> {
+        self.host_checked(account)
+            .inspect_err(|err| tracing::debug!(%err, "no host for avatars"))
+            .ok()
+    }
+
+    /// One host per account, shared by all repos: they share the token and so the quota.
+    fn host_checked(&self, account: &Account) -> Result<Arc<dyn GitHost>, HostError> {
         type Hosts = Option<HashMap<String, (Account, Instant, Arc<dyn GitHost>)>>;
         static HOSTS: Mutex<Hosts> = Mutex::new(None);
         let cached = |map: &Hosts| {
@@ -102,20 +172,15 @@ impl HostedRepo {
                 .map(|(.., host)| host.clone())
         };
         if let Some(host) = cached(&HOSTS.lock().unwrap_or_else(|p| p.into_inner())) {
-            return Some(host);
+            return Ok(host);
         }
         // Outside the lock: the keychain (and an OAuth refresh) can take a while. GCM accounts
         // have no secret here; public repos still answer anonymously.
-        let token = match self.accounts.git_token(account) {
-            Ok(token) => token,
-            Err(err) => {
-                tracing::debug!(%err, "no token for hosted avatars");
-                return None;
-            }
-        };
-        let host = connect(account, token, transport())
-            .inspect_err(|err| tracing::debug!(%err, "no host for avatars"))
-            .ok()?;
+        let token = self
+            .accounts
+            .git_token(account)
+            .map_err(|err| HostError::Config(format!("could not read the saved sign-in: {err}")))?;
+        let host = connect(account, token, transport())?;
         HOSTS
             .lock()
             .unwrap_or_else(|p| p.into_inner())
@@ -124,7 +189,7 @@ impl HostedRepo {
                 account.id.clone(),
                 (account.clone(), Instant::now(), host.clone()),
             );
-        Some(host)
+        Ok(host)
     }
 }
 
@@ -135,11 +200,24 @@ fn transport() -> Arc<dyn Transport> {
         .clone()
 }
 
-/// Fetch URLs, `origin` first, the rest in their order.
-fn remote_urls(remotes: &[Remote]) -> Vec<String> {
-    let url = |r: &Remote| r.fetch_url.clone().or_else(|| r.push_url.clone());
+/// `(name, fetch URL)`, `origin` first, the rest in their order; remotes without a URL are
+/// left out.
+fn ordered_remotes(remotes: &[Remote]) -> Vec<(String, String)> {
+    let url = |r: &Remote| {
+        let url = r.fetch_url.clone().or_else(|| r.push_url.clone())?;
+        Some((r.name.clone(), url))
+    };
     let (origin, rest): (Vec<_>, Vec<_>) = remotes.iter().partition(|r| r.name == "origin");
     origin.into_iter().chain(rest).filter_map(url).collect()
+}
+
+/// Fetch URLs in [`ordered_remotes`] order.
+#[cfg(test)]
+fn remote_urls(remotes: &[Remote]) -> Vec<String> {
+    ordered_remotes(remotes)
+        .into_iter()
+        .map(|(_, url)| url)
+        .collect()
 }
 
 /// Blocked or nearly out: leave the rest of the quota to the panels.
@@ -185,6 +263,24 @@ mod tests {
         assert_eq!(
             remote_urls(&remotes),
             ["git@github.com:o/r.git", "https://github.com/me/r.git"]
+        );
+    }
+
+    #[test]
+    fn remote_names_travel_with_their_urls() {
+        let remotes = [
+            remote("fork", Some("https://github.com/me/r.git"), None),
+            remote("origin", Some("git@github.com:o/r.git"), None),
+        ];
+        assert_eq!(
+            ordered_remotes(&remotes),
+            [
+                ("origin".to_string(), "git@github.com:o/r.git".to_string()),
+                (
+                    "fork".to_string(),
+                    "https://github.com/me/r.git".to_string()
+                )
+            ]
         );
     }
 

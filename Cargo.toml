@@ -22,6 +22,7 @@ ui = { path = "crates/ui" }
 git-core = { path = "crates/git-core" }
 hosts = { path = "crates/hosts" }
 accounts = { path = "crates/accounts" }
+ai = { path = "crates/ai" }
 
 [workspace.lints.rust]
 unsafe_code = "deny"
@@ -41,4 +42,7 @@ debug = "line-tables-only"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+# Line tables only: on MSVC they go to a separate gitdragon.pdb (ship it as a symbols zip, not in the exe);
+# on Linux CI splits them out with objcopy. panic stays "unwind" (abort saves little and loses panic containment).
+# Release measurements and packaging: benches/startup.md, docs/release.md.
 debug = "line-tables-only"

@@ -8,6 +8,8 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::{Deserialize, Serialize};
 
+use crate::prefs::Prefs;
+
 const FILE_NAME: &str = "state.json";
 const STATE_DIR_ENV: &str = "GITDRAGON_STATE_DIR";
 pub const RECENT_MAX: usize = 20;
@@ -46,6 +48,9 @@ pub struct SavedState {
     /// Look up author avatars on Gravatar (sends email hashes there; off by default).
     #[serde(default)]
     pub gravatar: Option<bool>,
+    /// Settings page values (git, editor, diff, pull, refresh timers).
+    #[serde(default)]
+    pub prefs: Prefs,
 }
 
 impl SavedState {
@@ -158,6 +163,18 @@ mod tests {
         std::fs::write(&path, "{ not json").unwrap();
         assert_eq!(SavedState::load_from(&path), SavedState::default());
         assert!(path.with_extension("json.bad").exists());
+
+        // Unknown and missing fields are fine (older / newer versions), prefs included.
+        std::fs::write(
+            &path,
+            r#"{"open_tabs": ["/y"], "prefs": {"context_lines": 5}}"#,
+        )
+        .unwrap();
+        let loaded = SavedState::load_from(&path);
+        assert_eq!(loaded.prefs.context_lines, 5);
+        assert!(loaded.prefs.show_command);
+        std::fs::write(&path, r#"{"open_tabs": ["/y"]}"#).unwrap();
+        assert_eq!(SavedState::load_from(&path).prefs, Prefs::default());
 
         // Unknown and missing fields are fine (older / newer versions).
         std::fs::write(&path, r#"{"future_field": 1, "open_tabs": ["/x"]}"#).unwrap();

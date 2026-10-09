@@ -15,10 +15,10 @@ use gpui_kit::component::dock::{
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::{
-    AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, FontWeight,
+    App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, Window, div,
-    linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task, WeakEntity,
+    Window, div, linear_color_stop, linear_gradient, prelude::FluentBuilder as _, px,
 };
 use ui::{Appearance, Mode, Palette, theme};
 
@@ -27,6 +27,7 @@ use crate::clone_dialog::{CloneDialog, CloneEvent};
 use crate::graph::DetailsPanel;
 use crate::graph::link::GraphLink;
 use crate::op_strip::{OpStrip, OpStripEvent};
+use crate::palette::{self, Command};
 use crate::panels::CenterView;
 use crate::rail::{ActivityRail, View};
 use crate::repo_tab::RepoTab;
@@ -56,7 +57,16 @@ pub struct Workspace {
     state: SavedState,
     save_task: Option<Task<()>>,
     dialog_sub: Option<Subscription>,
+    /// What each tab's toasts last showed, so one error or Undo toasts once.
+    toasts: Vec<(WeakEntity<RepoTab>, ToastMemory)>,
     _subs: Vec<Subscription>,
+}
+
+/// The error text and Undo record id a tab's toasts last showed.
+#[derive(Default)]
+struct ToastMemory {
+    error: Option<SharedString>,
+    undo: Option<u64>,
 }
 
 impl Workspace {
@@ -133,14 +143,27 @@ impl Workspace {
                 &crate::avatars::handle(cx).expect("avatars::init runs before the workspace"),
                 |this, _, _: &crate::avatars::SettingChanged, cx| this.schedule_save(cx),
             ),
-            cx.subscribe(&op_strip, |this, _, event: &OpStripEvent, cx| match event {
-                OpStripEvent::Cancel => {
-                    if let Some(changes) = this.center.read(cx).active_changes() {
-                        changes.update(cx, |view, cx| view.cancel_op(cx));
-                    }
-                    if let Some(tab) = this.active.and_then(|ix| this.tabs.get(ix)).cloned() {
-                        tab.update(cx, |tab, cx| tab.cancel_op(cx));
-                    }
+            cx.subscribe(&op_strip, |this, _, event: &OpStripEvent, cx| {
+                let Some(tab) = this.active.and_then(|ix| this.tabs.get(ix)).cloned() else {
+                    return;
+                };
+                match event {
+                    OpStripEvent::Cancel => tab.update(cx, |tab, cx| tab.cancel_op(cx)),
+                    OpStripEvent::Undo => tab.update(cx, |tab, cx| tab.undo_last(cx)),
+                }
+            }),
+            cx.subscribe(
+                &crate::prefs::handle(cx).expect("prefs::init runs before the workspace"),
+                |this, _, _: &crate::prefs::PrefsChanged, cx| {
+                    this.schedule_save(cx);
+                    cx.notify();
+                },
+            ),
+            // Background fetches slow down while the window is in the background.
+            cx.observe_window_activation(window, |this, window, cx| {
+                let active = window.is_window_active();
+                for tab in &this.tabs {
+                    tab.update(cx, |tab, cx| tab.set_window_focused(active, cx));
                 }
             }),
         ];
@@ -159,6 +182,7 @@ impl Workspace {
             state,
             save_task: None,
             dialog_sub: None,
+            toasts: Vec::new(),
             _subs,
         };
         workspace.detect_git(cx);
@@ -231,6 +255,7 @@ impl Workspace {
         let tab = cx.new(|cx| RepoTab::new(path, runner, cx));
         self._subs.push(cx.observe(&tab, |this, _, cx| {
             this.sync_strip(cx);
+            this.sync_toasts(cx);
             cx.notify()
         }));
         self.tabs.push(tab);
@@ -249,8 +274,11 @@ impl Workspace {
                 cx.notify();
             });
         }
-        self.center
-            .update(cx, |center, cx| center.set_repo(repo, cx));
+        let open_tabs = self.tabs.iter().map(Entity::downgrade).collect();
+        self.center.update(cx, |center, cx| {
+            center.set_open_tabs(open_tabs, cx);
+            center.set_repo(repo, cx)
+        });
         self.sync_strip(cx);
         self.schedule_save(cx);
         cx.notify();
@@ -275,6 +303,59 @@ impl Workspace {
         });
         self.op_strip
             .update(cx, |strip, cx| strip.set_branch(branch, cx));
+        let undo = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|tab| tab.read(cx).undo.as_ref().map(|u| u.describe()));
+        self.op_strip
+            .update(cx, |strip, cx| strip.set_undo(undo, cx));
+    }
+
+    /// Toasts for what happened in the tabs: a failed operation, an Undo on offer (and its
+    /// removal once it is taken or has expired).
+    fn sync_toasts(&mut self, cx: &mut Context<Self>) {
+        self.toasts.retain(|(tab, _)| tab.upgrade().is_some());
+        for tab in self.tabs.clone() {
+            let weak = tab.downgrade();
+            let at = match self.toasts.iter().position(|(t, _)| *t == weak) {
+                Some(at) => at,
+                None => {
+                    self.toasts.push((weak.clone(), ToastMemory::default()));
+                    self.toasts.len() - 1
+                }
+            };
+            let (error, undo, name) = {
+                let tab = tab.read(cx);
+                (
+                    tab.op_error.clone(),
+                    tab.undo.as_ref().map(|u| (u.id, u.label.clone())),
+                    tab.name.clone(),
+                )
+            };
+            let memory = &mut self.toasts[at].1;
+            let new_error = match &error {
+                Some(err) if memory.error.as_ref() != Some(err) => Some(err.clone()),
+                _ => None,
+            };
+            memory.error = error;
+            let old_undo = memory.undo;
+            memory.undo = undo.as_ref().map(|(id, _)| *id);
+            let new_undo = memory.undo;
+            if let Some(err) = new_error
+                && err.as_ref() != crate::repo_tab::CANCELLED
+            {
+                crate::toast::error(cx, format!("{name}: operation failed"), &err);
+            }
+            if old_undo != new_undo {
+                if let Some(old) = old_undo {
+                    crate::toast::dismiss_undo(cx, old);
+                }
+                if let Some((id, label)) = undo {
+                    let message = format!("{label} finished in {name}. Undo is on offer for 30 s.");
+                    crate::toast::undo(cx, weak, id, message);
+                }
+            }
+        }
     }
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -315,10 +396,13 @@ impl Workspace {
             let Some(runner) = this.runner.clone() else {
                 return;
             };
+            let branch = crate::prefs::get(cx).initial_branch().map(str::to_owned);
             cx.spawn(async move |this, cx| {
                 let created = cx
                     .background_executor()
-                    .spawn(async move { setup::init(&runner, &path).await })
+                    .spawn(async move {
+                        setup::init_with_branch(&runner, &path, branch.as_deref()).await
+                    })
                     .await;
                 _ = this.update(cx, |this, cx| match created {
                     Ok(root) => this.open_repo(root, cx),
@@ -425,6 +509,7 @@ impl Workspace {
         self.state.appearance = Some(theme::appearance(cx).key());
         let zoom = theme::zoom(cx);
         self.state.zoom = (zoom != ui::Zoom::default()).then_some(zoom.0);
+        self.state.prefs = crate::prefs::get(cx);
         self.state.gravatar = crate::avatars::handle(cx)
             .map(|a| a.read(cx).gravatar())
             .filter(|on| *on);
@@ -434,11 +519,171 @@ impl Workspace {
             .detach();
     }
 
+    // ---- command palette ----------------------------------------------------------------------
+
+    fn active_tab(&self) -> Option<Entity<RepoTab>> {
+        self.active.and_then(|ix| self.tabs.get(ix)).cloned()
+    }
+
+    /// What the palette needs to know about the active tab and the settings.
+    fn palette_ctx(&self, cx: &App) -> palette::Ctx {
+        let prefs = crate::prefs::get(cx);
+        let mut ctx = palette::Ctx {
+            pull_default: Some(prefs.pull.mode()),
+            prune: prefs.prune_on_fetch,
+            ..palette::Ctx::default()
+        };
+        let Some(tab) = self.active_tab() else {
+            return ctx;
+        };
+        let tab = tab.read(cx);
+        let branch = tab.status.as_ref().map(|s| &s.branch);
+        ctx.repo = true;
+        ctx.branch = branch.and_then(|b| b.head.clone());
+        ctx.upstream = branch.is_some_and(|b| b.upstream.is_some());
+        ctx.remote = tab
+            .remotes
+            .iter()
+            .find(|r| r.name == "origin")
+            .or(tab.remotes.first())
+            .map(|r| r.name.clone());
+        ctx.stashes = tab.stashes.len();
+        ctx.vocab = crate::hosted::HostedRepo::of_tab(tab, cx).and_then(|h| h.vocab());
+        ctx.undo = tab
+            .undo
+            .as_ref()
+            .map(|u| (u.label.clone(), u.action.preview()));
+        ctx
+    }
+
+    fn open_palette(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let ctx = self.palette_ctx(cx);
+        let this = cx.entity().downgrade();
+        palette::open(
+            &ctx,
+            move |command, window, cx| {
+                _ = this.update(cx, |this, cx| this.run_command(command, window, cx));
+            },
+            window,
+            cx,
+        );
+    }
+
+    /// Runs a palette command through the same code as the buttons, menus and shortcuts.
+    fn run_command(&mut self, command: Command, window: &mut Window, cx: &mut Context<Self>) {
+        let tab = self.active_tab();
+        match command {
+            Command::ShowView(view) => self.show(view, cx),
+            Command::ShowChanges => self.show_changes(window, cx),
+            Command::SettingsSection(section) => {
+                self.center.update(cx, |center, cx| {
+                    center.show_settings_section(section, window, cx)
+                });
+                cx.notify();
+            }
+            Command::Refresh => {
+                if let Some(tab) = tab {
+                    tab.update(cx, |tab, cx| tab.refresh(cx));
+                }
+            }
+            Command::Fetch => self.toolbar.update(cx, |t, cx| t.fetch(cx)),
+            Command::Pull(mode) => self.toolbar.update(cx, |t, cx| t.pull(mode, cx)),
+            Command::PullDefault => {
+                let mode = crate::prefs::get(cx).pull.mode();
+                self.toolbar.update(cx, |t, cx| t.pull(mode, cx));
+            }
+            Command::Push => self.toolbar.update(cx, |t, cx| t.push(cx)),
+            Command::Stash => self.toolbar.update(cx, |t, cx| t.stash(window, cx)),
+            Command::PopStash => self.toolbar.update(cx, |t, cx| t.pop_stash(cx)),
+            Command::NewBranch => self.toolbar.update(cx, |t, cx| t.new_branch(window, cx)),
+            Command::MergeBranch => self.prompt_branch_op(true, window, cx),
+            Command::RebaseOnto => self.prompt_branch_op(false, window, cx),
+            Command::UndoLast => {
+                if let Some(tab) = tab {
+                    tab.update(cx, |tab, cx| tab.undo_last(cx));
+                }
+            }
+            Command::OpenRepository => self.prompt_open(cx),
+            Command::CloneRepository => self.show_clone(window, cx),
+            Command::NewRepository => self.prompt_new(cx),
+            Command::CloseTab => {
+                if let Some(ix) = self.active {
+                    self.close_tab(ix, cx);
+                }
+            }
+            Command::ToggleLeftDock => self.toggle_dock(DockPlacement::Left, window, cx),
+            Command::ToggleRightDock => self.toggle_dock(DockPlacement::Right, window, cx),
+            Command::ToggleMode => {
+                theme::toggle_mode(cx);
+            }
+            Command::NextSkin => {
+                theme::cycle_skin(cx);
+            }
+            Command::ZoomIn => {
+                theme::step_zoom(1, cx);
+            }
+            Command::ZoomOut => {
+                theme::step_zoom(-1, cx);
+            }
+            Command::ZoomReset => {
+                theme::set_zoom(1.0, cx);
+            }
+        }
+    }
+
+    /// "Merge a branch into the current one" / "Rebase onto": asks for the branch or ref.
+    fn prompt_branch_op(&mut self, merge: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        let current = tab
+            .read(cx)
+            .status
+            .as_ref()
+            .and_then(|s| s.branch.head.clone())
+            .unwrap_or_else(|| "HEAD".into());
+        let (title, button) = if merge {
+            (format!("Merge into {current}"), "Merge")
+        } else {
+            (format!("Rebase {current} onto"), "Rebase")
+        };
+        let tab = tab.downgrade();
+        self.dialog_sub = Some(crate::dialogs::prompt(
+            window,
+            cx,
+            title,
+            vec![crate::dialogs::Field::new(
+                "Branch or ref, e.g. feature/login or origin/main",
+            )],
+            &[button],
+            move |values, _, _, cx| {
+                let rev = values[0].clone();
+                _ = tab.update(cx, |tab, cx| {
+                    if merge {
+                        tab.merge_branch(rev, cx)
+                    } else {
+                        tab.rebase_onto(rev, cx)
+                    }
+                });
+            },
+        ));
+    }
+
     // ---- rendering --------------------------------------------------------------------------
 
     fn show(&mut self, view: View, cx: &mut Context<Self>) {
         self.center
             .update(cx, |center, cx| center.set_view(view, cx));
+        cx.notify();
+    }
+
+    /// The working copy: the graph's WIP row, with the details dock (commit box) open.
+    fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.center
+            .update(cx, |center, cx| center.show_changes(window, cx));
+        if !self.dock.read(cx).is_dock_open(DockPlacement::Right) {
+            self.toggle_dock(DockPlacement::Right, window, cx);
+        }
         cx.notify();
     }
 
@@ -614,12 +859,18 @@ impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(cx);
         let active = self.center.read(cx).view();
+        let vocab = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .and_then(|tab| crate::hosted::HostedRepo::of_tab(tab.read(cx), cx))
+            .and_then(|hosted| hosted.vocab());
         let rail = ActivityRail::new(active, {
             let this = cx.entity().downgrade();
             move |view, _, cx| {
                 _ = this.update(cx, |this, cx| this.show(view, cx));
             }
-        });
+        })
+        .vocab(vocab);
 
         v_flex()
             .id("workspace")
@@ -629,7 +880,9 @@ impl Render for Workspace {
             .bg(palette.bg)
             .text_color(palette.fg)
             .on_action(cx.listener(|this, _: &ShowGraph, _, cx| this.show(View::Graph, cx)))
-            .on_action(cx.listener(|this, _: &ShowChanges, _, cx| this.show(View::Changes, cx)))
+            .on_action(
+                cx.listener(|this, _: &ShowChanges, window, cx| this.show_changes(window, cx)),
+            )
             .on_action(cx.listener(|this, _: &ShowConflicts, _, cx| this.show(View::Conflicts, cx)))
             .on_action(
                 cx.listener(|this, _: &ShowPullRequests, _, cx| this.show(View::PullRequests, cx)),
@@ -638,6 +891,14 @@ impl Render for Workspace {
             .on_action(cx.listener(|this, _: &ShowBoards, _, cx| this.show(View::Boards, cx)))
             .on_action(cx.listener(|this, _: &ShowChat, _, cx| this.show(View::Chat, cx)))
             .on_action(cx.listener(|this, _: &ShowSettings, _, cx| this.show(View::Settings, cx)))
+            .on_action(
+                cx.listener(|this, _: &CommandPalette, window, cx| this.open_palette(window, cx)),
+            )
+            .on_action(cx.listener(|this, _: &UndoLast, _, cx| {
+                if let Some(ix) = this.active {
+                    this.tabs[ix].update(cx, |tab, cx| tab.undo_last(cx));
+                }
+            }))
             .on_action(cx.listener(|this, _: &ToggleLeftDock, window, cx| {
                 this.toggle_dock(DockPlacement::Left, window, cx)
             }))

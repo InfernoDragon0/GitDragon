@@ -881,7 +881,7 @@ impl Render for AccountsCard {
                 "Username and token for this server. Stored only in the system keychain."
             }
             (AuthMode::OAuth, HostKind::GitHub) => {
-                "Opens github.com: type the code shown here. GitDragon asks for repo and read:org; tokens stay in the system keychain."
+                "Opens github.com: type the code shown here. GitDragon asks for repo, read:org and project (Boards); tokens stay in the system keychain."
             }
             (AuthMode::OAuth, HostKind::GitLab) => {
                 "Opens gitlab.com in your browser; approve and come back. Tokens stay in the system keychain and refresh themselves."

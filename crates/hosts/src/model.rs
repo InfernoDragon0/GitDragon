@@ -17,9 +17,14 @@ pub enum Feature {
     Issues,
     CreateIssue,
     IssueComments,
+    /// Closing and reopening issues ([`crate::GitHost::set_issue_state`]).
+    CloseIssue,
     CiStatus,
     /// Author avatars by commit / email ([`crate::GitHost::author_avatar`]).
     Avatars,
+    /// Project boards: GitHub Projects, GitLab issue boards, Azure Boards
+    /// ([`crate::GitHost::boards`]).
+    Boards,
 }
 
 impl Feature {
@@ -33,8 +38,10 @@ impl Feature {
             Feature::Issues => "issues",
             Feature::CreateIssue => "creating issues",
             Feature::IssueComments => "issue comments",
+            Feature::CloseIssue => "closing issues",
             Feature::CiStatus => "CI status",
             Feature::Avatars => "avatars",
+            Feature::Boards => "boards",
         }
     }
 }

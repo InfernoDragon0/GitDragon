@@ -22,8 +22,9 @@ use crate::secret::Secret;
 
 /// GitHub OAuth App (device flow enabled) registered for GitDragon.
 pub const GITHUB_CLIENT_ID: &str = "Ov23lisyEn80CxLY0RK3";
-/// Scopes for GitHub; `project` is added once Boards is used.
-pub const GITHUB_SCOPES: &str = "repo read:org";
+/// Scopes for GitHub: `project` (read / write Projects v2) is for Boards. Accounts signed in
+/// before it was asked for get a "sign in again" prompt on the Boards tab.
+pub const GITHUB_SCOPES: &str = "repo read:org project";
 /// gitlab.com application (public, PKCE) registered for GitDragon.
 pub const GITLAB_CLIENT_ID: &str =
     "f8c1d84438f11b73bba5e34a8f7fc082f3190d4e4ba78dbec2c191624113fa6b";

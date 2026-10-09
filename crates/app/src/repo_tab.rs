@@ -5,23 +5,37 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use bstr::BString;
+use git_core::conflicts::{self, ConflictFile, InProgress};
 use git_core::lfs::{LfsAttrs, LfsStatus, Lock};
 use git_core::parse::refs::{RefEntry, Remote, Stash};
 use git_core::parse::status::Status;
 use git_core::watch::{self, ChangeSet, RepoWatcher};
 use git_core::{CliRepo, GitRepo as _, GitRunner, Submodule};
-use gpui_kit::{Context, SharedString, Task};
+use gpui_kit::{Context, SharedString, Subscription, Task};
+use hosts::PollSchedule;
 
 use crate::state::repo_name;
+use crate::undo::{self, UndoPlan, UndoRecord};
+
+/// The message of a cancelled operation (it is not worth a toast).
+pub const CANCELLED: &str = "Cancelled.";
 
 /// Wait after opening before background upkeep starts.
 const MAINTENANCE_DELAY: std::time::Duration = std::time::Duration::from_secs(2);
+/// How often the background fetch timer looks at its schedule.
+const AUTO_FETCH_TICK: std::time::Duration = std::time::Duration::from_secs(15);
+/// A background fetch that takes longer than this is abandoned (git is killed).
+const AUTO_FETCH_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
 pub struct RepoTab {
     pub path: PathBuf,
     pub name: SharedString,
     pub repo: Option<CliRepo>,
     pub status: Option<Status>,
+    /// A merge / rebase / cherry-pick / revert git stopped in the middle of.
+    pub in_progress: Option<InProgress>,
+    /// Unmerged paths of [`Self::status`].
+    pub conflicts: Vec<ConflictFile>,
     pub refs: Vec<RefEntry>,
     pub stashes: Vec<Stash>,
     pub remotes: Vec<Remote>,
@@ -41,6 +55,17 @@ pub struct RepoTab {
     pub op_label: Option<SharedString>,
     /// The running user operation; dropping it kills git.
     op_task: Option<Task<()>>,
+    /// The Undo on offer for the last operation, for [`undo::WINDOW`].
+    pub undo: Option<UndoRecord>,
+    undo_serial: u64,
+    undo_task: Option<Task<()>>,
+    /// Background `git fetch` timer (Settings > Refresh); `fetch_secs` 0 turns it off.
+    fetch_schedule: PollSchedule,
+    window_focused: bool,
+    auto_fetching: bool,
+    auto_fetch_task: Option<Task<()>>,
+    auto_fetch_job: Option<Task<()>>,
+    _prefs_sub: Option<Subscription>,
     /// Bumped on every successful refresh, so views can tell the status changed.
     pub generation: u64,
     pub error: Option<SharedString>,
@@ -56,11 +81,17 @@ pub struct RepoTab {
 
 impl RepoTab {
     pub fn new(path: PathBuf, runner: GitRunner, cx: &mut Context<Self>) -> Self {
+        let prefs = crate::prefs::handle(cx);
+        // Opening counts as a fetch: the first background one comes one interval later.
+        let mut fetch_schedule = PollSchedule::auto_fetch(&crate::prefs::get(cx).poll);
+        fetch_schedule.record(std::time::Instant::now(), true);
         let mut tab = Self {
             name: repo_name(&path).into(),
             path,
             repo: None,
             status: None,
+            in_progress: None,
+            conflicts: Vec::new(),
             refs: Vec::new(),
             stashes: Vec::new(),
             remotes: Vec::new(),
@@ -74,6 +105,15 @@ impl RepoTab {
             op_error: None,
             op_label: None,
             op_task: None,
+            undo: None,
+            undo_serial: 0,
+            undo_task: None,
+            fetch_schedule,
+            window_focused: true,
+            auto_fetching: false,
+            auto_fetch_task: None,
+            auto_fetch_job: None,
+            _prefs_sub: None,
             generation: 0,
             error: None,
             runner,
@@ -84,7 +124,94 @@ impl RepoTab {
             _tasks: Vec::new(),
         };
         tab.open(cx);
+        if let Some(prefs) = prefs {
+            let sub = cx.subscribe(&prefs, |tab, _, _: &crate::prefs::PollChanged, cx| {
+                tab.on_prefs_changed(cx)
+            });
+            tab._prefs_sub = Some(sub);
+        }
+        tab.start_auto_fetch(cx);
         tab
+    }
+
+    // ---- background fetch ---------------------------------------------------------------------
+
+    fn on_prefs_changed(&mut self, cx: &mut Context<Self>) {
+        let mut schedule = PollSchedule::auto_fetch(&crate::prefs::get(cx).poll);
+        schedule.set_focused(self.window_focused, std::time::Instant::now());
+        schedule.record(std::time::Instant::now(), true);
+        self.fetch_schedule = schedule;
+    }
+
+    /// The window gained or lost focus: unfocused, the fetch interval stretches (Settings >
+    /// Refresh); coming back runs a fetch that is already due without waiting for the timer.
+    pub fn set_window_focused(&mut self, focused: bool, cx: &mut Context<Self>) {
+        self.window_focused = focused;
+        self.fetch_schedule
+            .set_focused(focused, std::time::Instant::now());
+        if focused {
+            self.auto_fetch_tick(cx);
+        }
+    }
+
+    fn start_auto_fetch(&mut self, cx: &mut Context<Self>) {
+        self.auto_fetch_task = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(AUTO_FETCH_TICK).await;
+                if this.update(cx, |tab, cx| tab.auto_fetch_tick(cx)).is_err() {
+                    break;
+                }
+            }
+        }));
+    }
+
+    /// Fetches all remotes in the background when the schedule says it is due. Never runs next to
+    /// a user operation, never raises an error (failures just back the timer off), and a
+    /// repository without remotes has nothing to fetch.
+    fn auto_fetch_tick(&mut self, cx: &mut Context<Self>) {
+        let now = std::time::Instant::now();
+        if self.auto_fetching
+            || self.op_task.is_some()
+            || self.remotes.is_empty()
+            || self.in_progress.is_some()
+            || !self.fetch_schedule.is_due(now, None)
+        {
+            return;
+        }
+        let Some(repo) = self.repo.clone() else {
+            return;
+        };
+        let prune = crate::prefs::get(cx).prune_on_fetch;
+        self.auto_fetching = true;
+        let path = self.path.clone();
+        let executor = cx.background_executor().clone();
+        self.auto_fetch_job = Some(cx.spawn(async move |this, cx| {
+            let timer = executor.clone();
+            let result = executor
+                .spawn(async move {
+                    let fetch = async { repo.fetch(None, prune).await.map_err(|e| e.to_string()) };
+                    let limit = async {
+                        timer.timer(AUTO_FETCH_LIMIT).await;
+                        Err("timed out".to_string())
+                    };
+                    futures_lite::future::or(fetch, limit).await
+                })
+                .await;
+            _ = this.update(cx, |tab, cx| {
+                tab.auto_fetching = false;
+                tab.fetch_schedule
+                    .record(std::time::Instant::now(), result.is_ok());
+                match result {
+                    Ok(()) => {
+                        tracing::debug!(path = %path.display(), "background fetch done");
+                        tab.refresh(cx);
+                    }
+                    Err(err) => {
+                        tracing::debug!(path = %path.display(), %err, "background fetch failed")
+                    }
+                }
+            });
+        }));
     }
 
     fn open(&mut self, cx: &mut Context<Self>) {
@@ -300,6 +427,8 @@ impl RepoTab {
                 .background_executor()
                 .spawn(async move {
                     let status = repo.status().await?;
+                    // Optional: the banner only.
+                    let in_progress = repo.in_progress().await.unwrap_or(None);
                     // Optional: badges only.
                     let lfs_attrs = if lfs {
                         let paths: Vec<BString> =
@@ -314,14 +443,22 @@ impl RepoTab {
                     // Optional: a broken .gitmodules must not hide the rest.
                     let submodules = repo.submodules().await.unwrap_or_default();
                     Ok::<_, git_core::GitError>((
-                        status, refs, stashes, remotes, submodules, lfs_attrs,
+                        status,
+                        in_progress,
+                        refs,
+                        stashes,
+                        remotes,
+                        submodules,
+                        lfs_attrs,
                     ))
                 })
                 .await;
             _ = this.update(cx, |tab, cx| {
                 tab.loading = false;
                 match result {
-                    Ok((status, refs, stashes, remotes, submodules, lfs_attrs)) => {
+                    Ok((status, in_progress, refs, stashes, remotes, submodules, lfs_attrs)) => {
+                        tab.conflicts = conflicts::conflict_files(&status);
+                        tab.in_progress = in_progress;
                         tab.status = Some(status);
                         tab.lfs_attrs = lfs_attrs;
                         tab.refs = refs;
@@ -363,13 +500,39 @@ impl RepoTab {
         F: FnOnce(CliRepo) -> Fut + Send + 'static,
         Fut: std::future::Future<Output = git_core::Result<()>> + Send + 'static,
     {
+        self.run_op_with(label, cx, op, |tab, result, cx| {
+            if let Err(err) = result {
+                tab.op_error = Some(err.to_string().into());
+            }
+            then(tab, cx);
+        });
+    }
+
+    /// [`Self::run_op`] for callers that handle the outcome themselves: `done` gets the result
+    /// (nothing lands in [`Self::op_error`] unless it puts it there), then the tab refreshes.
+    /// False when another operation is running (or the repo is not open): nothing started.
+    pub fn run_op_with<T, F, Fut>(
+        &mut self,
+        label: impl Into<SharedString>,
+        cx: &mut Context<Self>,
+        op: F,
+        done: impl FnOnce(&mut Self, T, &mut Context<Self>) + 'static,
+    ) -> bool
+    where
+        T: Send + 'static,
+        F: FnOnce(CliRepo) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = T> + Send + 'static,
+    {
         if self.op_task.is_some() {
-            return;
+            return false;
         }
         let Some(repo) = self.repo.clone() else {
-            return;
+            return false;
         };
         self.op_error = None;
+        // Any new operation makes the last Undo stale (its safety checks would refuse anyway).
+        self.undo = None;
+        self.undo_task = None;
         self.op_label = Some(label.into());
         let job = cx.background_executor().spawn(op(repo));
         self.op_task = Some(cx.spawn(async move |this, cx| {
@@ -377,21 +540,132 @@ impl RepoTab {
             _ = this.update(cx, |tab, cx| {
                 tab.op_task = None;
                 tab.op_label = None;
-                if let Err(err) = result {
-                    tab.op_error = Some(err.to_string().into());
-                }
-                then(tab, cx);
+                done(tab, result, cx);
                 tab.refresh(cx);
             });
         }));
         cx.notify();
+        true
+    }
+
+    /// [`Self::run_op`] for operations a reflog can take back: HEAD-moving ones (`Head`) and
+    /// branch deletion (`Branch`). The state is noted first; when the operation succeeds and
+    /// changed something (and did not stop half-way in a merge / rebase), an Undo is offered
+    /// for [`undo::WINDOW`].
+    pub fn run_op_undoable<F, Fut>(
+        &mut self,
+        label: impl Into<SharedString>,
+        plan: UndoPlan,
+        cx: &mut Context<Self>,
+        op: F,
+    ) where
+        F: FnOnce(CliRepo) -> Fut + Send + 'static,
+        Fut: std::future::Future<Output = git_core::Result<()>> + Send + 'static,
+    {
+        let label: SharedString = label.into();
+        let name = label.to_string();
+        self.run_op_with(
+            label,
+            cx,
+            move |repo| async move {
+                let before = match &plan {
+                    UndoPlan::Head => repo.head_state().await.ok(),
+                    UndoPlan::Branch(_) => None,
+                };
+                let tip = match &plan {
+                    UndoPlan::Branch(branch) => repo.branch_tip(branch).await.ok().flatten(),
+                    UndoPlan::Head => None,
+                };
+                let result = op(repo.clone()).await;
+                let action = if result.is_err() {
+                    None
+                } else {
+                    match (&plan, before) {
+                        (UndoPlan::Head, Some(before)) => {
+                            let settled = repo.in_progress().await.is_ok_and(|p| p.is_none());
+                            match repo.head_state().await {
+                                Ok(after) if settled => undo::head_undo(&before, &after),
+                                _ => None,
+                            }
+                        }
+                        (UndoPlan::Branch(branch), _) => {
+                            let exists = repo.branch_tip(branch).await.ok().flatten().is_some();
+                            undo::branch_undo(branch, tip, exists)
+                        }
+                        _ => None,
+                    }
+                };
+                (result, action)
+            },
+            move |tab, (result, action), cx| match result {
+                Err(err) => tab.op_error = Some(err.to_string().into()),
+                Ok(()) => {
+                    if let Some(action) = action {
+                        tab.offer_undo(name, action, cx);
+                    }
+                }
+            },
+        );
+    }
+
+    /// `git merge <rev>` into the current branch (the sidebar menu and the palette).
+    pub fn merge_branch(&mut self, rev: String, cx: &mut Context<Self>) {
+        let label = format!("Merging {rev}");
+        self.run_op_undoable(label, UndoPlan::Head, cx, move |repo| async move {
+            repo.merge(&rev, git_core::conflicts::MergeMode::Default)
+                .await
+        });
+    }
+
+    /// Rebases the current branch onto `rev` (the sidebar menu and the palette).
+    pub fn rebase_onto(&mut self, rev: String, cx: &mut Context<Self>) {
+        let label = format!("Rebasing onto {rev}");
+        self.run_op_undoable(label, UndoPlan::Head, cx, move |repo| async move {
+            repo.rebase(&rev).await
+        });
+    }
+
+    fn offer_undo(&mut self, label: String, action: git_core::UndoAction, cx: &mut Context<Self>) {
+        self.undo_serial += 1;
+        let id = self.undo_serial;
+        self.undo = Some(UndoRecord::new(
+            id,
+            label,
+            action,
+            std::time::Instant::now(),
+        ));
+        self.undo_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(undo::WINDOW).await;
+            _ = this.update(cx, |tab, cx| {
+                if tab.undo.as_ref().is_some_and(|u| u.id == id) {
+                    tab.undo = None;
+                    cx.notify();
+                }
+            });
+        }));
+        cx.notify();
+    }
+
+    /// Runs the offered Undo (a normal operation: shown in the strip, errors reported).
+    pub fn undo_last(&mut self, cx: &mut Context<Self>) {
+        let Some(record) = self.undo.clone() else {
+            return;
+        };
+        if !record.is_fresh(std::time::Instant::now()) || self.is_busy() {
+            return;
+        }
+        let action = record.action;
+        let label = format!("Undoing: {}", record.label);
+        self.run_op(label, cx, move |repo| async move {
+            repo.apply_undo(&action).await
+        });
     }
 
     /// Stops the running operation (its git process is killed).
     pub fn cancel_op(&mut self, cx: &mut Context<Self>) {
         if self.op_task.take().is_some() {
             self.op_label = None;
-            self.op_error = Some("Cancelled.".into());
+            self.op_error = Some(CANCELLED.into());
             cx.notify();
         }
     }
@@ -400,6 +674,21 @@ impl RepoTab {
         if self.op_error.take().is_some() {
             cx.notify();
         }
+    }
+
+    /// `--continue` / `--skip` / `--abort` the operation in progress.
+    pub fn finish_operation(&mut self, step: OpStep, cx: &mut Context<Self>) {
+        let Some(op) = self.in_progress.as_ref().map(|p| p.op) else {
+            return;
+        };
+        let label = format!("{} {}", step.label(), op.label().to_lowercase());
+        self.run_op(label, cx, move |repo| async move {
+            match step {
+                OpStep::Continue => repo.continue_operation(op).await,
+                OpStep::Skip => repo.skip_operation(op).await,
+                OpStep::Abort => repo.abort_operation(op).await,
+            }
+        });
     }
 
     /// `main · 3 changed`-style summary for placeholders and the tab tooltip.
@@ -424,6 +713,23 @@ impl RepoTab {
             ));
         }
         out
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpStep {
+    Continue,
+    Skip,
+    Abort,
+}
+
+impl OpStep {
+    pub fn label(self) -> &'static str {
+        match self {
+            OpStep::Continue => "Continue",
+            OpStep::Skip => "Skip",
+            OpStep::Abort => "Abort",
+        }
     }
 }
 
