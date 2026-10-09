@@ -8,7 +8,7 @@
 //!   lanes, signature gradient, `now`), read with [`Palette::of`].
 
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
-use gpui_kit::{App, Global, Hsla, rgb, rgba};
+use gpui_kit::{App, Global, Hsla, Pixels, px, rgb, rgba};
 
 const AURORA_JSON: &str = include_str!("aurora.json");
 const ONYX_JSON: &str = include_str!("onyx.json");
@@ -319,6 +319,74 @@ pub fn set_appearance(appearance: Appearance, cx: &mut App) {
     });
     // `change` reloads the mode's config even when the mode is unchanged, so a skin swap applies.
     Theme::change(appearance.mode, None, cx);
+    // The config just reset the font sizes: scale them again.
+    apply_zoom(cx);
+}
+
+// ---- zoom -------------------------------------------------------------------------------------
+
+/// UI zoom (1.0 = 100%). Scales the theme's font sizes, which gpui-component also uses as the
+/// rem unit, so text and rem-based spacing follow; fixed pixel sizes go through [`zoomed`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Zoom(pub f32);
+
+impl Global for Zoom {}
+
+impl Zoom {
+    pub const MIN: f32 = 0.8;
+    pub const MAX: f32 = 1.6;
+    pub const STEP: f32 = 0.1;
+
+    /// Clamped and rounded to whole percent, so repeated steps don't drift.
+    pub fn new(value: f32) -> Self {
+        let value = if value.is_finite() { value } else { 1.0 };
+        Self((value.clamp(Self::MIN, Self::MAX) * 100.).round() / 100.)
+    }
+
+    pub fn percent(self) -> u32 {
+        (self.0 * 100.).round() as u32
+    }
+}
+
+impl Default for Zoom {
+    fn default() -> Self {
+        Self(1.0)
+    }
+}
+
+/// Font sizes in the theme JSON at 100% (`font.size`, `mono_font.size`).
+const BASE_FONT_SIZE: f32 = 13.;
+const BASE_MONO_FONT_SIZE: f32 = 12.;
+
+pub fn zoom(cx: &App) -> Zoom {
+    cx.try_global::<Zoom>().copied().unwrap_or_default()
+}
+
+/// Sets the zoom; every window repaints at the new size.
+pub fn set_zoom(value: f32, cx: &mut App) -> Zoom {
+    let zoom = Zoom::new(value);
+    cx.set_global(zoom);
+    apply_zoom(cx);
+    zoom
+}
+
+/// One [`Zoom::STEP`] up (`+1`) or down (`-1`).
+pub fn step_zoom(steps: i32, cx: &mut App) -> Zoom {
+    set_zoom(zoom(cx).0 + steps as f32 * Zoom::STEP, cx)
+}
+
+fn apply_zoom(cx: &mut App) {
+    let z = zoom(cx).0;
+    Theme::update(cx, |theme| {
+        theme.font_size = px(BASE_FONT_SIZE * z);
+        theme.mono_font_size = px(BASE_MONO_FONT_SIZE * z);
+    });
+    cx.refresh_windows();
+}
+
+/// A fixed pixel size at the current zoom (row heights, diff text).
+pub fn zoomed(size: f32, cx: &App) -> Pixels {
+    px(size * zoom(cx).0)
 }
 
 /// Flips dark <-> light, keeping the skin.
@@ -387,6 +455,78 @@ mod tests {
                 assert!(!lower.contains(banned), "theme uses {banned}");
             }
         }
+    }
+
+    /// Every theme defines its own syntax colours (otherwise gpui-component's default light
+    /// palette shows up on dark panels), and each one is readable on the panel: WCAG AA 4.5:1.
+    #[test]
+    fn syntax_colours_parse_and_contrast() {
+        use gpui_kit::component::highlighter::HighlightThemeStyle;
+
+        fn luminance(c: Hsla) -> f32 {
+            let c = c.to_rgb();
+            let lin = |v: f32| {
+                if v <= 0.03928 {
+                    v / 12.92
+                } else {
+                    ((v + 0.055) / 1.055).powf(2.4)
+                }
+            };
+            0.2126 * lin(c.r) + 0.7152 * lin(c.g) + 0.0722 * lin(c.b)
+        }
+        fn contrast(a: Hsla, b: Hsla) -> f32 {
+            let (a, b) = (luminance(a), luminance(b));
+            (a.max(b) + 0.05) / (a.min(b) + 0.05)
+        }
+
+        for (skin, json) in [(Skin::Aurora, AURORA_JSON), (Skin::Onyx, ONYX_JSON)] {
+            let value: serde_json::Value = serde_json::from_str(json).unwrap();
+            for theme in value["themes"].as_array().unwrap() {
+                let name = theme["name"].as_str().unwrap();
+                let mode = if theme["mode"] == "light" {
+                    Mode::Light
+                } else {
+                    Mode::Dark
+                };
+                let style: HighlightThemeStyle = serde_json::from_value(theme["highlight"].clone())
+                    .unwrap_or_else(|e| panic!("{name}: {e}"));
+                let panel = Palette::for_appearance(Appearance { skin, mode }).panel;
+                let s = &style.syntax;
+                for (what, colour) in [
+                    ("keyword", s.keyword),
+                    ("comment", s.comment),
+                    ("string", s.string),
+                    ("number", s.number),
+                    ("function", s.function),
+                    ("type", s.type_),
+                    ("property", s.property),
+                    ("operator", s.operator),
+                    ("punctuation", s.punctuation),
+                    ("attribute", s.attribute),
+                ] {
+                    let colour = colour
+                        .and_then(|c| c.color)
+                        .unwrap_or_else(|| panic!("{name}: no {what} colour"));
+                    let ratio = contrast(colour, panel);
+                    assert!(ratio >= 4.5, "{name}: {what} contrast {ratio:.2} < 4.5");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn zoom_clamps_and_rounds() {
+        assert_eq!(Zoom::new(1.0).percent(), 100);
+        assert_eq!(Zoom::new(5.0), Zoom(Zoom::MAX));
+        assert_eq!(Zoom::new(0.1), Zoom(Zoom::MIN));
+        assert_eq!(Zoom::new(f32::NAN), Zoom(1.0));
+        // Ten +0.1 steps from 100% land exactly on the max, not 1.5999.
+        let mut z = Zoom::default();
+        for _ in 0..10 {
+            z = Zoom::new(z.0 + Zoom::STEP);
+        }
+        assert_eq!(z.percent(), 160);
+        assert_eq!(Zoom::new(1.234).percent(), 123);
     }
 
     #[test]

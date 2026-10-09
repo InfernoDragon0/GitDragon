@@ -1,12 +1,33 @@
-[package]
+﻿[package]
 name = "ui"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 
+[features]
+default = ["syntax-syntect"]
+# Syntax colours in diffs. tree-sitter: a small grammar set (each adds ~1.2 MB to the exe).
+syntax-tree-sitter = [
+    "gpui-kit/tree-sitter-rust",
+    "gpui-kit/tree-sitter-javascript",
+    "gpui-kit/tree-sitter-typescript",
+    "gpui-kit/tree-sitter-tsx",
+    "gpui-kit/tree-sitter-python",
+    "gpui-kit/tree-sitter-toml",
+    "gpui-kit/tree-sitter-markdown",
+    "gpui-kit/tree-sitter-csharp",
+    "gpui-kit/tree-sitter-go",
+]
+# syntect + two-face: bat's extended Sublime grammar set (~200 languages).
+syntax-syntect = ["dep:syntect", "dep:two-face"]
+
 [dependencies]
 gpui-kit.workspace = true
+git-core.workspace = true
+bstr = "1.13"
+syntect = { version = "5", default-features = false, features = ["parsing", "regex-fancy", "default-syntaxes"], optional = true }
+two-face = { version = "0.5", default-features = false, features = ["syntect-fancy"], optional = true }
 
 [lints]
 workspace = true

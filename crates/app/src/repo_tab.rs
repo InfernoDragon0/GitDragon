@@ -18,6 +18,8 @@ pub struct RepoTab {
     pub status: Option<Status>,
     pub refs: Vec<RefEntry>,
     pub loading: bool,
+    /// Bumped on every successful refresh, so views can tell the status changed.
+    pub generation: u64,
     pub error: Option<SharedString>,
     runner: GitRunner,
     watcher: Option<RepoWatcher>,
@@ -36,6 +38,7 @@ impl RepoTab {
             status: None,
             refs: Vec::new(),
             loading: true,
+            generation: 0,
             error: None,
             runner,
             watcher: None,
@@ -154,6 +157,7 @@ impl RepoTab {
                     Ok((status, refs)) => {
                         tab.status = Some(status);
                         tab.refs = refs;
+                        tab.generation += 1;
                         tab.error = None;
                     }
                     Err(err) => tab.error = Some(err.to_string().into()),

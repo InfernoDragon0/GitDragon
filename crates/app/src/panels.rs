@@ -3,13 +3,16 @@
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::v_flex;
 use gpui_kit::{
-    App, Context, Entity, EventEmitter, FocusHandle, Focusable, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Subscription, Window, div,
+    App, AppContext as _, Context, Entity, EventEmitter, FocusHandle, Focusable,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString, Styled as _,
+    Subscription, WeakEntity, Window, div,
 };
 use ui::Palette;
 
+use crate::changes::ChangesView;
 use crate::rail::View;
 use crate::repo_tab::RepoTab;
+use crate::settings::SettingsView;
 use crate::welcome::Welcome;
 
 /// A titled panel that says what will live there.
@@ -68,6 +71,10 @@ pub struct CenterView {
     view: View,
     repo: Option<Entity<RepoTab>>,
     welcome: Entity<Welcome>,
+    /// One Changes view per repository tab, so selection and drafts survive tab switches.
+    changes: Vec<(WeakEntity<RepoTab>, Entity<ChangesView>)>,
+    /// Created on first visit; Settings works with no repository open.
+    settings: Option<Entity<SettingsView>>,
     focus: FocusHandle,
     _observe_repo: Option<Subscription>,
 }
@@ -78,6 +85,8 @@ impl CenterView {
             view: View::default(),
             repo: None,
             welcome,
+            changes: Vec::new(),
+            settings: None,
             focus: cx.focus_handle(),
             _observe_repo: None,
         }
@@ -88,7 +97,33 @@ impl CenterView {
             .as_ref()
             .map(|repo| cx.observe(repo, |_, _, cx| cx.notify()));
         self.repo = repo;
+        // Closed tabs: drop their views (and any running operation).
+        self.changes.retain(|(tab, _)| tab.upgrade().is_some());
         cx.notify();
+    }
+
+    /// The Changes view of the active repository, if one exists.
+    pub fn active_changes(&self) -> Option<Entity<ChangesView>> {
+        let repo = self.repo.as_ref()?.downgrade();
+        self.changes
+            .iter()
+            .find(|(tab, _)| *tab == repo)
+            .map(|(_, view)| view.clone())
+    }
+
+    fn changes_view(
+        &mut self,
+        repo: Entity<RepoTab>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> Entity<ChangesView> {
+        let weak = repo.downgrade();
+        if let Some((_, view)) = self.changes.iter().find(|(tab, _)| *tab == weak) {
+            return view.clone();
+        }
+        let view = cx.new(|cx| ChangesView::new(repo, window, cx));
+        self.changes.push((weak, view.clone()));
+        view
     }
 
     pub fn view(&self) -> View {
@@ -111,9 +146,9 @@ impl BasePanel for CenterView {
 
 impl Panel for CenterView {
     fn title(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
-        match self.repo {
-            Some(_) => self.view.label(),
-            None => "Welcome",
+        match (&self.repo, self.view) {
+            (_, View::Settings) | (Some(_), _) => self.view.label(),
+            (None, _) => "Welcome",
         }
     }
 }
@@ -127,7 +162,26 @@ impl Focusable for CenterView {
 }
 
 impl Render for CenterView {
-    fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.view == View::Settings {
+            let view = self
+                .settings
+                .get_or_insert_with(|| cx.new(|cx| SettingsView::new(window, cx)))
+                .clone();
+            return div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(view)
+                .into_any_element();
+        }
+        if let (View::Changes, Some(repo)) = (self.view, self.repo.clone()) {
+            let view = self.changes_view(repo, window, cx);
+            return div()
+                .size_full()
+                .track_focus(&self.focus)
+                .child(view)
+                .into_any_element();
+        }
         let Some(repo) = &self.repo else {
             return div()
                 .size_full()
@@ -138,13 +192,13 @@ impl Render for CenterView {
         let repo = repo.read(cx);
         let hint = match self.view {
             View::Graph => "Commit graph and history.",
-            View::Changes => "Working tree status, hunk staging and commit.",
+            View::Changes => unreachable!("rendered by ChangesView"),
             View::Conflicts => "Merge, rebase and cherry-pick conflicts.",
             View::PullRequests => "Pull requests from your connected hosts.",
             View::Issues => "Issues from your connected hosts.",
             View::Boards => "GitHub Projects, GitLab boards and Azure Boards.",
             View::Chat => "AI chat with Claude Code.",
-            View::Settings => "Appearance, accounts, git and keyboard settings.",
+            View::Settings => unreachable!("rendered by SettingsView"),
         };
         let title = format!("{} · {}", repo.name, self.view.label());
         let body = format!(

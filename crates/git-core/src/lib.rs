@@ -4,7 +4,9 @@
 pub mod cli;
 pub mod detect;
 pub mod error;
+pub mod ops;
 pub mod parse;
+pub mod patch;
 pub mod progress;
 pub mod repo;
 pub mod runner;
@@ -18,6 +20,8 @@ pub mod gix_repo {}
 pub use cli::{CliRepo, LogStream};
 pub use detect::{GitBinary, GitVersion};
 pub use error::{FailureKind, GitError, Result};
+pub use ops::{ApplyTarget, CommitRequest, StashAction};
+pub use patch::{Direction, Pick};
 pub use progress::Progress;
 pub use repo::{DiffTarget, GitRepo, LogQuery};
 pub use runner::{CommandLog, CommandRecord, GitCommand, GitOutput, GitRunner, GitStream, Mode};

@@ -1,10 +1,13 @@
 //! GitDragon desktop app entry point.
 
 mod actions;
+mod changes;
 mod clone_dialog;
+mod op_strip;
 mod panels;
 mod rail;
 mod repo_tab;
+mod settings;
 mod startup;
 mod state;
 mod welcome;
@@ -42,6 +45,9 @@ fn main() {
             .map(|v| Appearance::parse(&v))
             .unwrap_or_default();
         theme::init(appearance, cx);
+        if let Some(zoom) = saved.zoom {
+            theme::set_zoom(zoom, cx);
+        }
         startup::mark("theme");
         actions::bind_keys(cx);
 
@@ -51,6 +57,15 @@ fn main() {
         });
         cx.on_action(|_: &NextSkin, cx| {
             theme::cycle_skin(cx);
+        });
+        cx.on_action(|_: &ZoomIn, cx| {
+            theme::step_zoom(1, cx);
+        });
+        cx.on_action(|_: &ZoomOut, cx| {
+            theme::step_zoom(-1, cx);
+        });
+        cx.on_action(|_: &ZoomReset, cx| {
+            theme::set_zoom(1.0, cx);
         });
         cx.on_window_closed(|cx, _| {
             if cx.windows().is_empty() {

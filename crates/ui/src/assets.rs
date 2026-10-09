@@ -8,7 +8,10 @@ use gpui_kit::{AssetSource, Result, SharedString};
 icon_assets!(
     pub ExtraIcons,
     [
+        Archive,
+        ArchiveRestore,
         CircleDot,
+        Columns2,
         Download,
         FileDiff,
         FolderGit2,
@@ -18,15 +21,21 @@ icon_assets!(
         GitGraph,
         GitMergeConflict,
         GitPullRequest,
+        List,
+        ListTree,
         MessageSquare,
+        Minus,
         Moon,
         PanelLeft,
         PanelRight,
+        Plus,
         RefreshCw,
+        Rows2,
         Settings,
         SquareKanban,
         Sun,
         TriangleAlert,
+        Undo2,
         X,
     ]
 );

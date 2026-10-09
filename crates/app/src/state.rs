@@ -40,6 +40,9 @@ pub struct SavedState {
     pub dock: Option<DockLayout>,
     /// Folder the clone dialog suggested last.
     pub clone_parent: Option<PathBuf>,
+    /// UI zoom (1.0 = 100%).
+    #[serde(default)]
+    pub zoom: Option<f32>,
 }
 
 impl SavedState {

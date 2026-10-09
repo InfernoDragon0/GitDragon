@@ -24,6 +24,7 @@ use ui::{Appearance, Mode, Palette, theme};
 
 use crate::actions::*;
 use crate::clone_dialog::{CloneDialog, CloneEvent};
+use crate::op_strip::{OpStrip, OpStripEvent};
 use crate::panels::{CenterView, Placeholder};
 use crate::rail::{ActivityRail, View};
 use crate::repo_tab::RepoTab;
@@ -40,6 +41,7 @@ pub struct Workspace {
     dock: Entity<DockArea>,
     center: Entity<CenterView>,
     welcome: Entity<Welcome>,
+    op_strip: Entity<OpStrip>,
     focus: FocusHandle,
     /// `None` until git is detected (or when it is missing / too old).
     runner: Option<GitRunner>,
@@ -62,6 +64,7 @@ impl Workspace {
             welcome
         });
         let center = cx.new(|cx| CenterView::new(welcome.clone(), cx));
+        let op_strip = cx.new(|_| OpStrip::new());
         let sidebar = cx.new(|cx| {
             Placeholder::new(
                 "sidebar",
@@ -126,12 +129,21 @@ impl Workspace {
                 }
             }),
             cx.observe_global::<Appearance>(|this, cx| this.schedule_save(cx)),
+            cx.observe_global::<ui::Zoom>(|this, cx| this.schedule_save(cx)),
+            cx.subscribe(&op_strip, |this, _, event: &OpStripEvent, cx| match event {
+                OpStripEvent::Cancel => {
+                    if let Some(changes) = this.center.read(cx).active_changes() {
+                        changes.update(cx, |view, cx| view.cancel_op(cx));
+                    }
+                }
+            }),
         ];
 
         let mut workspace = Self {
             dock,
             center,
             welcome,
+            op_strip,
             focus,
             runner: None,
             tabs: Vec::new(),
@@ -155,7 +167,10 @@ impl Workspace {
             _ = this.update(cx, |this, cx| match found {
                 Ok(git) => {
                     tracing::info!(path = %git.path.display(), version = %git.version, "git");
-                    this.runner = Some(GitRunner::new(git));
+                    let runner = GitRunner::new(git);
+                    this.op_strip
+                        .update(cx, |strip, cx| strip.listen(&runner, cx));
+                    this.runner = Some(runner);
                     let tabs = std::mem::take(&mut this.state.open_tabs);
                     let active = this.state.active_tab;
                     for path in tabs.into_iter().filter(|p| p.exists()) {
@@ -204,7 +219,10 @@ impl Workspace {
             return;
         };
         let tab = cx.new(|cx| RepoTab::new(path, runner, cx));
-        self._subs.push(cx.observe(&tab, |_, _, cx| cx.notify()));
+        self._subs.push(cx.observe(&tab, |this, _, cx| {
+            this.sync_strip(cx);
+            cx.notify()
+        }));
         self.tabs.push(tab);
     }
 
@@ -213,8 +231,30 @@ impl Workspace {
         let repo = self.active.map(|ix| self.tabs[ix].clone());
         self.center
             .update(cx, |center, cx| center.set_repo(repo, cx));
+        self.sync_strip(cx);
         self.schedule_save(cx);
         cx.notify();
+    }
+
+    /// Branch and ahead / behind of the active tab, on the right of the operation strip.
+    fn sync_strip(&mut self, cx: &mut Context<Self>) {
+        let branch = self.active.and_then(|ix| {
+            let status = self.tabs.get(ix)?.read(cx).status.as_ref()?;
+            let mut text = status
+                .branch
+                .head
+                .clone()
+                .unwrap_or_else(|| "detached HEAD".into());
+            if status.branch.upstream.is_some() {
+                text.push_str(&format!(
+                    " ↑{} ↓{}",
+                    status.branch.ahead, status.branch.behind
+                ));
+            }
+            Some(text)
+        });
+        self.op_strip
+            .update(cx, |strip, cx| strip.set_branch(branch, cx));
     }
 
     fn close_tab(&mut self, ix: usize, cx: &mut Context<Self>) {
@@ -363,6 +403,8 @@ impl Workspace {
             self.state.active_tab = self.active;
         }
         self.state.appearance = Some(theme::appearance(cx).key());
+        let zoom = theme::zoom(cx);
+        self.state.zoom = (zoom != ui::Zoom::default()).then_some(zoom.0);
         let snapshot = self.state.clone();
         cx.background_executor()
             .spawn(async move { snapshot.save() })
@@ -438,15 +480,26 @@ impl Workspace {
                 )
         });
         let welcome_active = self.active.is_none();
-        h_flex().gap_1().children(tabs.collect::<Vec<_>>()).child(
-            Button::new("open-repo")
-                .ghost()
-                .xsmall()
-                .icon(IconName::Plus)
-                .toggled(welcome_active && !self.tabs.is_empty())
-                .tooltip_with_action("Open, clone or create a repository", &OpenRepository, None)
-                .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.activate(None, cx))),
-        )
+        // The title bar is a window-drag area; on Windows a click there goes to the OS (move the
+        // window) unless something above it takes the mouse. `occlude` makes the tabs clickable.
+        h_flex()
+            .id("repo-tabs")
+            .occlude()
+            .gap_1()
+            .children(tabs.collect::<Vec<_>>())
+            .child(
+                Button::new("open-repo")
+                    .ghost()
+                    .xsmall()
+                    .icon(IconName::Plus)
+                    .toggled(welcome_active && !self.tabs.is_empty())
+                    .tooltip_with_action(
+                        "Open, clone or create a repository",
+                        &OpenRepository,
+                        None,
+                    )
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.activate(None, cx))),
+            )
     }
 
     fn render_title_bar(&self, cx: &mut Context<Self>) -> impl IntoElement {
@@ -523,6 +576,8 @@ impl Workspace {
                 )
                 .child(
                     h_flex()
+                        .id("title-actions")
+                        .occlude()
                         .gap_1()
                         .child(skin_button)
                         .child(mode_button)
@@ -592,6 +647,7 @@ impl Render for Workspace {
                     .child(rail)
                     .child(div().flex_1().h_full().min_w_0().child(self.dock.clone())),
             )
+            .child(self.op_strip.clone())
     }
 }
 
