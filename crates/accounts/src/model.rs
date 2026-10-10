@@ -131,6 +131,17 @@ impl Account {
     }
 }
 
+/// Every account for a remote, the ones holding a token first (a Credential Manager account
+/// has none for API calls), otherwise in list order.
+pub fn find_accounts<'a>(accounts: &'a [Account], url: &str) -> Vec<&'a Account> {
+    let Some(origin) = Origin::of(url) else {
+        return Vec::new();
+    };
+    let mut found: Vec<&Account> = accounts.iter().filter(|a| a.matches(&origin)).collect();
+    found.sort_by_key(|a| !a.auth.has_secret());
+    found
+}
+
 /// The account for a remote / askpass URL: exact origin match, first wins.
 pub fn find_account<'a>(accounts: &'a [Account], url: &str) -> Option<&'a Account> {
     let origin = Origin::of(url)?;
@@ -169,6 +180,27 @@ mod tests {
         assert!(!hit("https://github.com:8443/x"));
         assert!(!hit("git@github.com:owner/repo.git"));
         assert!(!hit("not a url"));
+    }
+
+    #[test]
+    fn token_accounts_come_first() {
+        let named = |id: &str, auth| Account {
+            id: id.into(),
+            auth,
+            ..account("https://github.com")
+        };
+        let accounts = [
+            named("gcm", AuthMode::Gcm),
+            named("pat", AuthMode::Pat),
+            account("https://gitlab.com"),
+            named("oauth", AuthMode::OAuth),
+        ];
+        let ids: Vec<&str> = find_accounts(&accounts, "https://github.com/o/r.git")
+            .iter()
+            .map(|a| a.id.as_str())
+            .collect();
+        assert_eq!(ids, ["pat", "oauth", "gcm"]);
+        assert!(find_accounts(&accounts, "not a url").is_empty());
     }
 
     #[test]

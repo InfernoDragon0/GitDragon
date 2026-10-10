@@ -1,5 +1,4 @@
-//! Canary (security P0): a registered token in commit messages, diffs, file names or errors never
-//! comes out of a tool. Its own test binary: the redaction registry is process-wide.
+//! Redaction canary for tool output. Its own test binary: the redaction registry is process-wide.
 
 use std::path::Path;
 use std::process::Command;

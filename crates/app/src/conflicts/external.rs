@@ -1,9 +1,4 @@
 //! Hand a conflicted file to VS Code (3-way merge editor) or Zed (inline conflict UI).
-//!
-//! Security P0 (checklist m-muzibww35bu9): editors are found on absolute `PATH` entries or at
-//! known install locations and started by that absolute path, never by bare name (a repo can't
-//! plant `code.cmd`). File paths are absolute (so never read as options) and, for VS Code, sit
-//! after `--`. Stage copies go to a fresh temp dir.
 
 use std::path::{Path, PathBuf};
 use std::process::Command;

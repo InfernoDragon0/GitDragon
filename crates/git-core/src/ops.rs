@@ -1,10 +1,6 @@
 //! Working-tree operations behind the Changes panel: stage / unstage / discard (files and
 //! patches), commit, push and stashes. All run as [`Mode::Write`](crate::Mode) commands, so the
 //! user's hooks and config apply as in a terminal.
-//!
-//! Security (checklist P0): paths are repo-relative, never absolute or containing `..`, and go
-//! after `--` as literal pathspecs; patches are applied without `--unsafe-paths`, so `git apply`
-//! refuses anything outside the worktree. Confirming a discard is the caller's job.
 
 use std::path::{Component, Path};
 

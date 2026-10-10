@@ -73,5 +73,4 @@ Optional: GPG-sign the `.deb` / an apt repository, and sign the AppImage (`appim
 ## Gaps before the first public release
 
 - App icon: no `.ico` / `.icns` / `.png` exists yet (installer, exe resource, dmg, AppImage all have `TODO(icon)` markers).
-- Project licence undecided (installer and winget manifest carry `TODO(license)`).
 - Signing certificates (above).

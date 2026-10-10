@@ -1,16 +1,5 @@
 //! Finding and spawning Claude Code's ACP adapter (`@zed-industries/claude-code-acp`, a Node
-//! package) safely.
-//!
-//! - The program is always an absolute path: an explicit override, or a match in an *absolute*
-//!   `PATH` entry ([`git_core::detect::absolute_path_dirs`]). Never a bare name.
-//! - npm's launcher shims (`claude-code-acp.cmd` on Windows, a symlink to a `#!/usr/bin/env node`
-//!   script elsewhere) are unwrapped: we run an absolutely-resolved `node` with the package's
-//!   own entry script, so neither `cmd.exe` nor `env` looks anything up on `PATH`.
-//! - `npx --yes @zed-industries/claude-code-acp` (downloads on first use) only when the user
-//!   turned it on in Settings; `npx` itself is resolved absolutely too.
-//! - The child gets a scrubbed environment ([`scrub_env`]): none of GitDragon's own variables,
-//!   no askpass hooks, no forge tokens, no git config injection, and `PATH` reduced to its
-//!   absolute entries.
+//! package).
 
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
@@ -130,7 +119,6 @@ fn launch(
         source,
     };
     // Not a script (a native binary), or a .cmd we cannot unwrap: run it by its absolute path
-    // (std quotes a .cmd for cmd.exe; there are no arguments to inject into).
     let Some(script) = script_for(found) else {
         return Ok(direct(found));
     };
@@ -254,7 +242,7 @@ const SCRUB_EXACT: &[&str] = &[
 ];
 
 /// Prefixes (case-insensitive) never passed: GitDragon's own variables (askpass socket and key
-/// among them) and git's per-process config injection.
+/// among them) and git's per-process config variables.
 const SCRUB_PREFIX: &[&str] = &["GITDRAGON_", "GIT_CONFIG_KEY_", "GIT_CONFIG_VALUE_"];
 
 /// Should `name` be kept out of the adapter's environment?

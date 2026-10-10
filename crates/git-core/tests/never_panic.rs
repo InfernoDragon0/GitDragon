@@ -1,5 +1,5 @@
-//! Security P0: parsers return `Ok` or `Err` on any input, never panic. Dependency-free
-//! pseudo-fuzzing over real fixtures and token soup; the cargo-fuzz targets in `fuzz/` go deeper.
+//! Parsers return `Ok` or `Err` on any input, never panic. Dependency-free pseudo-fuzzing over
+//! real fixtures and token soup; the cargo-fuzz targets in `fuzz/` go deeper.
 
 use git_core::parse::{diff, log, refs, status};
 

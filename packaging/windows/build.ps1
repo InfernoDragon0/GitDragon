@@ -30,7 +30,7 @@ function Invoke-Sign([string]$path) {
 Copy-Item $Exe $stage
 Invoke-Sign (Join-Path $stage "gitdragon.exe")
 if (Test-Path README.md) { Copy-Item README.md $stage }
-if (Test-Path LICENSE) { Copy-Item LICENSE $stage }
+Copy-Item LICENSE-MIT, LICENSE-APACHE $stage
 
 $zip = Join-Path $OutDir "$name-portable.zip"
 if (Test-Path $zip) { Remove-Item $zip }

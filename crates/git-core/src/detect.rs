@@ -1,8 +1,4 @@
 //! Finds the installed git once, as an absolute path, and caches its version.
-//!
-//! Security (checklist P0): the binary is never resolved from the current directory or the
-//! opened repository. Relative `PATH` entries (including `.` and empty ones) are skipped, and
-//! only `git.exe` / `git` is considered (no `.bat` / `.cmd` shims).
 
 use std::ffi::OsString;
 use std::fmt;

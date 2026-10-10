@@ -17,7 +17,7 @@ pub mod validate;
 pub mod vault;
 
 pub use manager::{Accounts, AddError, NewAccount};
-pub use model::{Account, AuthMode, HostKind, Origin, find_account};
+pub use model::{Account, AuthMode, HostKind, Origin, find_account, find_accounts};
 pub use secret::Secret;
 pub use store::AccountStore;
 pub use vault::{KeyringVault, MemoryVault, Vault, VaultError};

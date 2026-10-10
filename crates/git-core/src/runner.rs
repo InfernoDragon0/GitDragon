@@ -1,14 +1,6 @@
 //! Async git runner: argv-only spawning with hardened env and flags, timeouts, cancellation
 //! (drop the future: the child is killed), streamed stdout, and a command log for the UI's
 //! operation strip.
-//!
-//! Security (checklist P0):
-//! - argv only, never `sh -c` / `cmd /c`; user refs go through [`GitCommand::rev`] (rejects
-//!   anything that could read as an option) and paths after `--` with literal pathspecs.
-//! - git runs from the absolute path found by [`crate::detect`]; `PATH` handed to git keeps
-//!   only absolute entries, and on Windows child processes never search the current dir.
-//! - Background reads ([`Mode::Read`]) run with `--no-optional-locks`, `core.fsmonitor=false`,
-//!   hooks disabled and no terminal prompts.
 
 use std::collections::VecDeque;
 use std::ffi::{OsStr, OsString};
@@ -64,7 +56,7 @@ fn read_flags() -> [&'static str; 6] {
     ]
 }
 
-/// Inherited variables that would redirect git away from the repo we chose, or inject config.
+/// Inherited variables removed from git's environment.
 const ENV_REMOVE: &[&str] = &[
     "GIT_DIR",
     "GIT_WORK_TREE",

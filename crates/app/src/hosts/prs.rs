@@ -271,6 +271,14 @@ impl PrsView {
         append: bool,
         cx: &mut Context<Self>,
     ) {
+        if let Err(err) = &result
+            && self
+                .session()
+                .is_some_and(|s| s.retry_with_other_account(err))
+        {
+            self.reconnect(cx);
+            return;
+        }
         let ok = result.is_ok();
         if !self
             .list

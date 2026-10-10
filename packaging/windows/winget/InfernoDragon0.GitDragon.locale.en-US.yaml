@@ -6,7 +6,8 @@ Publisher: InfernoDragon0
 PublisherUrl: https://github.com/InfernoDragon0
 PackageName: GitDragon
 PackageUrl: https://github.com/InfernoDragon0/GitDragon
-License: <LICENSE_SPDX_ID>  # TODO: decide the project licence first
+License: MIT OR Apache-2.0
+LicenseUrl: https://github.com/InfernoDragon0/GitDragon/blob/master/LICENSE-MIT
 ShortDescription: A fast, native Git client built with Rust and GPUI.
 Tags:
   - git

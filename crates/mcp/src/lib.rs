@@ -1,15 +1,4 @@
 //! `gitdragon-mcp`: GitDragon's git-core behind the Model Context Protocol, over stdio only.
-//!
-//! Security model (see `docs/mcp.md`):
-//! - stdio transport only. A future HTTP transport must bind 127.0.0.1, require a bearer token
-//!   and check `Origin`.
-//! - Only repositories named with `--repo` are reachable; a tool's `repo` must match one.
-//! - Write tools (`stage`, `unstage`, `commit`, `create_branch`) exist only with
-//!   `--allow-writes`; without it they are not listed and are refused if called.
-//! - No raw git arguments: every revision, path and branch name goes through git-core's
-//!   validators, and fixed flags are chosen here.
-//! - Every tool output and error passes through [`git_core::redact::redact`] and is capped at
-//!   [`tools::MAX_OUTPUT`] bytes (redacted first, so a cut never exposes half a secret).
 
 pub mod server;
 pub mod tools;

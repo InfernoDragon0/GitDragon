@@ -1,10 +1,7 @@
 //! The HTTP transport behind every provider.
 //!
 //! Hand-rolled REST over the shared reqwest stack rather than octocrab: one rustls client,
-//! redirects followed here (auth dropped on a cross-origin hop, never to plain HTTP), and
-//! conditional requests per endpoint in [`crate::api`]. Security P0 (checklist m-muzibww4nree):
-//! certificate verification is always on; a custom CA is a per-host opt-in that adds roots,
-//! it never disables checks.
+//! redirects followed here, and conditional requests per endpoint in [`crate::api`].
 
 use std::fmt;
 use std::time::Duration;
@@ -102,6 +99,36 @@ impl Response {
 #[async_trait]
 pub trait Transport: Send + Sync {
     async fn send(&self, request: Request) -> Result<Response, HostError>;
+}
+
+/// Passes requests through and calls `on_rejected` when the host answers 401: the token
+/// it carried is no good (expired, revoked).
+pub struct WatchSignIn {
+    inner: std::sync::Arc<dyn Transport>,
+    on_rejected: Box<dyn Fn() + Send + Sync>,
+}
+
+impl WatchSignIn {
+    pub fn new(
+        inner: std::sync::Arc<dyn Transport>,
+        on_rejected: impl Fn() + Send + Sync + 'static,
+    ) -> Self {
+        Self {
+            inner,
+            on_rejected: Box::new(on_rejected),
+        }
+    }
+}
+
+#[async_trait]
+impl Transport for WatchSignIn {
+    async fn send(&self, request: Request) -> Result<Response, HostError> {
+        let response = self.inner.send(request).await?;
+        if response.status == 401 {
+            (self.on_rejected)();
+        }
+        Ok(response)
+    }
 }
 
 /// The real network, on `accounts::net`'s runtime.
@@ -266,6 +293,46 @@ pub async fn send_following(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Answers(u16);
+
+    #[async_trait]
+    impl Transport for Answers {
+        async fn send(&self, _: Request) -> Result<Response, HostError> {
+            Ok(Response {
+                status: self.0,
+                headers: Vec::new(),
+                body: Vec::new(),
+            })
+        }
+    }
+
+    #[test]
+    fn watch_sign_in_reports_401_only() {
+        let seen = |status| {
+            let hits = Arc::new(AtomicUsize::new(0));
+            let counter = hits.clone();
+            let watched = WatchSignIn::new(Arc::new(Answers(status)), move || {
+                counter.fetch_add(1, Ordering::Relaxed);
+            });
+            let request = Request {
+                method: Method::Get,
+                url: Url::parse("https://api.github.com/user").unwrap(),
+                headers: Vec::new(),
+                auth: None,
+                body: None,
+            };
+            let response = accounts::net::block_on(watched.send(request)).unwrap();
+            assert_eq!(response.status, status, "passed through");
+            hits.load(Ordering::Relaxed)
+        };
+        assert_eq!(seen(401), 1);
+        assert_eq!(seen(200), 0);
+        assert_eq!(seen(403), 0);
+        assert_eq!(seen(404), 0);
+    }
 
     #[test]
     fn auth_debug_is_masked() {

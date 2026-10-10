@@ -1,6 +1,5 @@
-//! Canary (security P0): a registered token never shows in rendered chat text or error strings,
-//! whether it arrives in agent output, tool calls, permission prompts, protocol errors or
-//! Claude API errors. Its own test binary: the redaction registry is process-wide.
+//! Redaction canary for chat text and errors. Its own test binary: the redaction registry is
+//! process-wide.
 
 mod common;
 

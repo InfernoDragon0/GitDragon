@@ -33,7 +33,7 @@ pub use error::HostError;
 pub use github::GitHub;
 pub use gitlab::GitLab;
 pub use host::GitHost;
-pub use http::{HttpTransport, Transport};
+pub use http::{HttpTransport, Transport, WatchSignIn};
 pub use model::*;
 pub use poll::{PollConfig, PollSchedule};
 pub use remote::RepoId;
@@ -65,7 +65,13 @@ pub fn connect(
     }
 }
 
-/// The account a remote belongs to (exact web origin, see `accounts::model`).
+/// The account a remote belongs to (exact web origin, see `accounts::model`); one holding a
+/// token wins over a Credential Manager one.
 pub fn account_for<'a>(accounts: &'a [Account], repo: &RepoId) -> Option<&'a Account> {
-    accounts::find_account(accounts, &repo.web_base())
+    accounts_for(accounts, repo).into_iter().next()
+}
+
+/// Every account for the remote, best first (see [`accounts::find_accounts`]).
+pub fn accounts_for<'a>(accounts: &'a [Account], repo: &RepoId) -> Vec<&'a Account> {
+    accounts::find_accounts(accounts, &repo.web_base())
 }

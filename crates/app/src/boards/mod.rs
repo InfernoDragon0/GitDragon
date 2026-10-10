@@ -344,6 +344,12 @@ impl BoardsView {
         self.boards_loading = true;
         self.boards_task = Some(cx.spawn(async move |this, cx| {
             let result = own.host.boards(&own.repo).await;
+            if let Err(err) = &result
+                && own.retry_with_other_account(err)
+            {
+                _ = this.update(cx, |this, cx| this.reconnect(cx));
+                return;
+            }
             let ok = this
                 .update(cx, |this, cx| {
                     this.boards_loading = !others.is_empty();

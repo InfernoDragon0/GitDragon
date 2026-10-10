@@ -83,6 +83,10 @@ Please report vulnerabilities privately through GitHub security advisories rathe
 
 ## License
 
-The project licence has not been chosen yet (the workspace is `publish = false`), so no licence is granted for now.
+Licensed under either of [Apache License, Version 2.0](LICENSE-APACHE) or [MIT license](LICENSE-MIT) at your option.
+
+Unless you explicitly state otherwise, any contribution intentionally submitted for inclusion in GitDragon by you,
+as defined in the Apache-2.0 license, shall be dual licensed as above, without any additional terms or conditions.
+
 All dependencies are permissively licensed (MIT / Apache-2.0 / ISC / BSD and similar), enforced by `cargo deny`;
 a few MPL-2.0 crates are allowed by explicit exception only. Git itself is spawned as a separate process, never linked.

@@ -1,5 +1,5 @@
-//! Canary checks (security P0): a registered token never reaches log output or crash reports.
-//! Its own test binary: it swaps the process-wide panic hook.
+//! Redaction canary for logs and crash reports. Its own test binary: it swaps the process-wide
+//! panic hook.
 
 use std::io::Write as _;
 use std::sync::Mutex;

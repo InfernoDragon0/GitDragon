@@ -13,14 +13,14 @@ use gpui_kit::App;
 use hosts::host::HostResult;
 use hosts::{
     Feature, GitHost, HostError, HostVocab, HttpTransport, RateLimit, RepoId, Transport,
-    account_for, connect,
+    WatchSignIn, account_for, accounts_for, connect,
 };
 
 use crate::repo_tab::RepoTab;
 
 /// Below this many requests left the quota is kept for the pull request / issue panels.
 const KEEP_QUOTA: u32 = 100;
-/// Hosts (and the token they carry) are rebuilt after this, so a re-sign-in is picked up.
+/// Hosts (and the token they carry) are rebuilt after this; a sign-in rebuilds them at once.
 const HOST_TTL: Duration = Duration::from_secs(10 * 60);
 /// Asking again after a hiccup (offline, rate limit, keychain busy).
 const SOON: Duration = Duration::from_secs(60);
@@ -46,6 +46,16 @@ pub struct Session {
     pub repo: RepoId,
     /// The git remote the account matched (fetch and push go there).
     pub remote: String,
+    /// Another account is signed in for this host: when this one's sign-in is rejected,
+    /// resolving again picks that one.
+    pub fallback: bool,
+}
+
+impl Session {
+    /// The host rejected the sign-in and another account can be tried: resolve again.
+    pub fn retry_with_other_account(&self, err: &HostError) -> bool {
+        self.fallback && matches!(err, HostError::Unauthorized { .. })
+    }
 }
 
 /// What [`HostedRepo::resolve`] found.
@@ -87,7 +97,7 @@ impl HostedRepo {
             let Some(repo) = RepoId::parse(url) else {
                 continue;
             };
-            let Some(account) = account_for(&accounts, &repo) else {
+            let Some((account, fallback)) = self.pick(&accounts, &repo) else {
                 first.get_or_insert(repo);
                 continue;
             };
@@ -96,6 +106,7 @@ impl HostedRepo {
                     host,
                     repo,
                     remote: name.clone(),
+                    fallback,
                 }),
                 Err(HostError::Unsupported(_)) => {
                     Resolution::NoApi(HostVocab::of(account.kind).service)
@@ -125,8 +136,8 @@ impl HostedRepo {
         let accounts = self.accounts.list();
         self.remotes.iter().find_map(|(_, url)| {
             let repo = RepoId::parse(url)?;
-            let account = account_for(&accounts, &repo)?.clone();
-            Some((account, repo))
+            let (account, _) = self.pick(&accounts, &repo)?;
+            Some((account.clone(), repo))
         })
     }
 
@@ -161,14 +172,35 @@ impl HostedRepo {
             .ok()
     }
 
+    /// The account for `repo`, and whether another one could stand in for it. Accounts
+    /// holding a token come first; one whose sign-in the host rejected is passed over until
+    /// the accounts change (a sign-in), unless no other is left.
+    fn pick<'a>(&self, accounts: &'a [Account], repo: &RepoId) -> Option<(&'a Account, bool)> {
+        let all = accounts_for(accounts, repo);
+        let generation = self.accounts.generation();
+        let rejected = rejected().lock().unwrap_or_else(|p| p.into_inner());
+        let usable: Vec<&Account> = all
+            .iter()
+            .copied()
+            .filter(|a| rejected.get(&a.id) != Some(&generation))
+            .collect();
+        match usable.first() {
+            Some(first) => Some((first, usable.len() > 1)),
+            None => all.first().map(|first| (*first, false)),
+        }
+    }
+
     /// One host per account, shared by all repos: they share the token and so the quota.
     fn host_checked(&self, account: &Account) -> Result<Arc<dyn GitHost>, HostError> {
-        type Hosts = Option<HashMap<String, (Account, Instant, Arc<dyn GitHost>)>>;
+        type Hosts = Option<HashMap<String, (Account, u64, Instant, Arc<dyn GitHost>)>>;
         static HOSTS: Mutex<Hosts> = Mutex::new(None);
+        let generation = self.accounts.generation();
         let cached = |map: &Hosts| {
             map.as_ref()?
                 .get(&account.id)
-                .filter(|(a, built, _)| a == account && built.elapsed() < HOST_TTL)
+                .filter(|(a, made_in, built, _)| {
+                    a == account && *made_in == generation && built.elapsed() < HOST_TTL
+                })
                 .map(|(.., host)| host.clone())
         };
         if let Some(host) = cached(&HOSTS.lock().unwrap_or_else(|p| p.into_inner())) {
@@ -180,17 +212,31 @@ impl HostedRepo {
             .accounts
             .git_token(account)
             .map_err(|err| HostError::Config(format!("could not read the saved sign-in: {err}")))?;
-        let host = connect(account, token, transport())?;
+        let id = account.id.clone();
+        let watched = WatchSignIn::new(transport(), move || {
+            tracing::info!(account = %id, "sign-in rejected by the host");
+            rejected()
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .insert(id.clone(), generation);
+        });
+        let host = connect(account, token, Arc::new(watched))?;
         HOSTS
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .get_or_insert_default()
             .insert(
                 account.id.clone(),
-                (account.clone(), Instant::now(), host.clone()),
+                (account.clone(), generation, Instant::now(), host.clone()),
             );
         Ok(host)
     }
+}
+
+/// Account id -> the [`Accounts::generation`] in which its host answered 401.
+fn rejected() -> &'static Mutex<HashMap<String, u64>> {
+    static REJECTED: OnceLock<Mutex<HashMap<String, u64>>> = OnceLock::new();
+    REJECTED.get_or_init(Default::default)
 }
 
 fn transport() -> Arc<dyn Transport> {

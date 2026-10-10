@@ -2,6 +2,7 @@
 //! the UI and the askpass thread.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::askpass::{Ask, AskKind};
@@ -41,6 +42,8 @@ pub struct NewAccount {
 pub struct Accounts {
     store: Mutex<AccountStore>,
     vault: Box<dyn Vault>,
+    /// Bumped by every sign-in and sign-out, so holders of a token know to read it again.
+    generation: AtomicU64,
 }
 
 impl Accounts {
@@ -48,6 +51,7 @@ impl Accounts {
         let accounts = Self {
             store: Mutex::new(AccountStore::load(config_dir)),
             vault: Box::new(vault),
+            generation: AtomicU64::new(0),
         };
         accounts.merge_duplicates();
         Arc::new(accounts)
@@ -79,6 +83,11 @@ impl Accounts {
 
     fn store(&self) -> MutexGuard<'_, AccountStore> {
         self.store.lock().unwrap_or_else(|p| p.into_inner())
+    }
+
+    /// Changes whenever an account signs in (again) or out.
+    pub fn generation(&self) -> u64 {
+        self.generation.load(Ordering::Relaxed)
     }
 
     pub fn list(&self) -> Vec<Account> {
@@ -180,6 +189,7 @@ impl Accounts {
             _ = self.vault.delete(&account.id);
             return Err(err.into());
         }
+        self.generation.fetch_add(1, Ordering::Relaxed);
         Ok(account)
     }
 
@@ -209,6 +219,7 @@ impl Accounts {
         let token = self.vault.get(id).ok().flatten();
         self.vault.delete(id)?;
         self.store().remove(id)?;
+        self.generation.fetch_add(1, Ordering::Relaxed);
         if let Some(token) = token {
             git_core::redact::unregister(token.expose());
         }
@@ -351,6 +362,22 @@ mod tests {
             username: Some("me".into()),
             token: Some(Secret::new(token)),
         }
+    }
+
+    #[test]
+    fn sign_in_and_out_change_the_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let accounts = Accounts::new(dir.path(), MemoryVault::default());
+        let start = accounts.generation();
+        let account = block(accounts.add(generic("first-token-0123"))).unwrap();
+        let added = accounts.generation();
+        assert_ne!(added, start);
+        // Signing in again as the same login keeps the account but is still a change.
+        block(accounts.add(generic("second-token-0123"))).unwrap();
+        assert_ne!(accounts.generation(), added);
+        let before = accounts.generation();
+        accounts.remove(&account.id).unwrap();
+        assert_ne!(accounts.generation(), before);
     }
 
     #[test]

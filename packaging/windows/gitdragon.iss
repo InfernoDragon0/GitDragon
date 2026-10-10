@@ -47,7 +47,8 @@ UninstallDisplayIcon={app}\gitdragon.exe
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
-; TODO(license): ship LICENSE once the project licence is decided.
+Source: "..\..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\GitDragon"; Filename: "{app}\gitdragon.exe"

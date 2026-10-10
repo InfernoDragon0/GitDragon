@@ -1,8 +1,5 @@
 //! Git's credential protocol (`git credential fill|approve|reject`), used by GCM mode to get a
 //! token for API calls. Push / fetch need none of this: git asks the helper itself.
-//!
-//! Values containing a newline or NUL are refused before they reach git (they could inject
-//! extra attributes, the CVE-2020-5260 class).
 
 use git_core::{GitCommand, GitRunner};
 

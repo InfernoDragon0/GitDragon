@@ -250,6 +250,14 @@ impl IssuesView {
         self.list_task = Some(cx.spawn(async move |this, cx| {
             let result = host.issues(&repo, &query).await;
             _ = this.update(cx, |this, cx| {
+                if let Err(err) = &result
+                    && this
+                        .session()
+                        .is_some_and(|s| s.retry_with_other_account(err))
+                {
+                    this.reconnect(cx);
+                    return;
+                }
                 let ok = result.is_ok();
                 if this
                     .list

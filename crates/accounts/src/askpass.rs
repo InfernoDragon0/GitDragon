@@ -1,14 +1,6 @@
 //! `GIT_ASKPASS` bridge: git runs our own executable with a prompt such as
 //! `Password for 'https://me@github.com': `; that helper process asks the running app over a
 //! local socket and prints the answer.
-//!
-//! Security (checklist P0):
-//! - The socket is per launch (random name) and user-only: a Windows named pipe (others may at
-//!   most open it read-only, so they cannot send a request) or a Unix socket in a 0700 dir.
-//! - Every request carries a per-launch random key, compared in constant time.
-//! - Answers only for the exact scheme + host + port of a matched account (the resolver
-//!   decides; see [`crate::model::find_account`]), never for other hosts or submodules.
-//! - Tokens never appear in argv or URLs; values with a newline or NUL are refused.
 
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
