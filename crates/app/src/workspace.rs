@@ -13,7 +13,7 @@ use gpui_kit::component::dock::{
     DockArea, DockEvent, DockLayout, DockPlacement, DockSkin, panel_handle,
 };
 use gpui_kit::component::tooltip::Tooltip;
-use gpui_kit::component::{Sizable as _, TitleBar, h_flex, v_flex};
+use gpui_kit::component::{Icon, Sizable as _, TitleBar, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle, FontWeight,
     InteractiveElement as _, IntoElement, ParentElement as _, PathPromptOptions, Render,
@@ -44,6 +44,8 @@ const SAVE_DELAY: Duration = Duration::from_millis(400);
 
 pub struct Workspace {
     dock: Entity<DockArea>,
+    /// The dock area's look and its built-in panel toggle buttons.
+    dock_skin: std::rc::Rc<DockSkin>,
     center: Entity<CenterView>,
     sidebar: Entity<SidebarPanel>,
     toolbar: Entity<RepoToolbar>,
@@ -59,6 +61,9 @@ pub struct Workspace {
     dialog_sub: Option<Subscription>,
     /// What each tab's toasts last showed, so one error or Undo toasts once.
     toasts: Vec<(WeakEntity<RepoTab>, ToastMemory)>,
+    /// `(left, right)` open state of the docks while they are hidden off the Graph view, so
+    /// they reopen as the user left them (and the saved layout keeps that state).
+    parked_docks: Option<(bool, bool)>,
     _subs: Vec<Subscription>,
 }
 
@@ -73,7 +78,7 @@ impl Workspace {
     pub fn new(state: SavedState, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let _span = tracing::info_span!("workspace_new").entered();
 
-        let (dock, _skin) = DockSkin::dock_area("workspace", Some(DOCK_LAYOUT_VERSION), window, cx);
+        let (dock, dock_skin) = DockSkin::dock_area("workspace", Some(DOCK_LAYOUT_VERSION), window, cx);
         let welcome = cx.new(|cx| {
             let mut welcome = Welcome::new(cx);
             welcome.set_recent(&state.recent, cx);
@@ -137,6 +142,10 @@ impl Workspace {
                     this.schedule_save(cx);
                 }
             }),
+            // The docks belong to the Graph view; follow the centre as it switches.
+            cx.observe_in(&center, window, |this, _, window, cx| {
+                this.sync_docks(window, cx)
+            }),
             cx.observe_global::<Appearance>(|this, cx| this.schedule_save(cx)),
             cx.observe_global::<ui::Zoom>(|this, cx| this.schedule_save(cx)),
             cx.subscribe(
@@ -159,6 +168,14 @@ impl Workspace {
                     cx.notify();
                 },
             ),
+            // Resized / moved / maximized: remember it (debounced; `Drop` flushes on quit).
+            cx.observe_window_bounds(window, |this, window, cx| {
+                let now = crate::window_size::SavedWindow::capture(window);
+                if now.is_usable() && this.state.window != Some(now) {
+                    this.state.window = Some(now);
+                    this.schedule_save(cx);
+                }
+            }),
             // Background fetches slow down while the window is in the background.
             cx.observe_window_activation(window, |this, window, cx| {
                 let active = window.is_window_active();
@@ -170,6 +187,7 @@ impl Workspace {
 
         let mut workspace = Self {
             dock,
+            dock_skin,
             center,
             sidebar,
             toolbar: cx.new(|_| RepoToolbar::new()),
@@ -183,6 +201,7 @@ impl Workspace {
             save_task: None,
             dialog_sub: None,
             toasts: Vec::new(),
+            parked_docks: None,
             _subs,
         };
         workspace.detect_git(cx);
@@ -495,9 +514,15 @@ impl Workspace {
     fn save_now(&mut self, cx: &mut Context<Self>) {
         let dock = self.dock.read(cx);
         let width = |placement| dock.dock_size(placement).map(f32::from);
+        let (left_open, right_open) = self.parked_docks.unwrap_or_else(|| {
+            (
+                dock.is_dock_open(DockPlacement::Left),
+                dock.is_dock_open(DockPlacement::Right),
+            )
+        });
         self.state.dock = Some(state::DockLayout {
-            left_open: dock.is_dock_open(DockPlacement::Left),
-            right_open: dock.is_dock_open(DockPlacement::Right),
+            left_open,
+            right_open,
             left_width: width(DockPlacement::Left).unwrap_or(LEFT_DOCK_WIDTH),
             right_width: width(DockPlacement::Right).unwrap_or(RIGHT_DOCK_WIDTH),
         });
@@ -539,6 +564,7 @@ impl Workspace {
         let tab = tab.read(cx);
         let branch = tab.status.as_ref().map(|s| &s.branch);
         ctx.repo = true;
+        ctx.docks = self.center.read(cx).view() == View::Graph;
         ctx.branch = branch.and_then(|b| b.head.clone());
         ctx.upstream = branch.is_some_and(|b| b.upstream.is_some());
         ctx.remote = tab
@@ -681,10 +707,52 @@ impl Workspace {
     fn show_changes(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.center
             .update(cx, |center, cx| center.show_changes(window, cx));
+        self.sync_docks(window, cx);
         if !self.dock.read(cx).is_dock_open(DockPlacement::Right) {
             self.toggle_dock(DockPlacement::Right, window, cx);
         }
         cx.notify();
+    }
+
+    /// Shows the side docks on the Graph view only. Leaving it closes whichever are open and
+    /// remembers them; coming back reopens them (sizes live on in the dock area).
+    fn sync_docks(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let on_graph = self.center.read(cx).view() == View::Graph;
+        // The dock area's own branches / details toggle buttons (in the centre tab bar) would
+        // reopen parked docks: show them on the Graph view only.
+        if self.dock_skin.is_toggle_button_visible() != on_graph {
+            self.dock_skin.set_toggle_button_visible(on_graph, cx);
+        }
+        let toggle = |this: &mut Self, placement, window: &mut Window, cx: &mut Context<Self>| {
+            this.dock
+                .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
+        };
+        match (on_graph, self.parked_docks) {
+            (false, None) => {
+                let area = self.dock.read(cx);
+                let left = area.is_dock_open(DockPlacement::Left);
+                let right = area.is_dock_open(DockPlacement::Right);
+                self.parked_docks = Some((left, right));
+                for (placement, open) in
+                    [(DockPlacement::Left, left), (DockPlacement::Right, right)]
+                {
+                    if open {
+                        toggle(self, placement, window, cx);
+                    }
+                }
+            }
+            (true, Some((left, right))) => {
+                self.parked_docks = None;
+                for (placement, open) in
+                    [(DockPlacement::Left, left), (DockPlacement::Right, right)]
+                {
+                    if open {
+                        toggle(self, placement, window, cx);
+                    }
+                }
+            }
+            _ => {}
+        }
     }
 
     fn toggle_dock(
@@ -693,6 +761,10 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // The docks are hidden off the Graph view; their shortcuts do nothing there.
+        if self.parked_docks.is_some() {
+            return;
+        }
         self.dock
             .update(cx, |area, cx| area.toggle_dock(placement, window, cx));
     }
@@ -713,20 +785,34 @@ impl Workspace {
                 .rounded(px(5.))
                 .cursor_pointer()
                 .text_xs()
+                // Pill backdrop on every tab; the active one gets the accent ring.
+                .border_1()
                 .when(active, |this| {
-                    this.bg(palette.panel)
-                        .border_1()
-                        .border_color(palette.border_strong)
+                    this.bg(palette.accent_soft)
+                        .border_color(palette.accent)
                         .text_color(palette.emph)
                 })
                 .when(!active, |this| {
-                    this.text_color(palette.muted)
-                        .hover(|s| s.bg(palette.hover))
+                    this.bg(palette.panel2)
+                        .border_color(palette.border)
+                        .text_color(palette.muted)
+                        .hover(|s| s.bg(palette.hover).border_color(palette.border_strong))
                 })
                 .when(failed, |this| this.text_color(palette.error))
                 .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
                 .on_click(
                     cx.listener(move |this, _: &ClickEvent, _, cx| this.activate(Some(ix), cx)),
+                )
+                .child(
+                    Icon::new(IconName::FolderGit2)
+                        .xsmall()
+                        .text_color(if failed {
+                            palette.error
+                        } else if active {
+                            palette.accent
+                        } else {
+                            palette.muted
+                        }),
                 )
                 .child(tab.name.clone())
                 .child(
@@ -849,7 +935,10 @@ impl Workspace {
                         .gap_1()
                         .child(skin_button)
                         .child(mode_button)
-                        .child(right_dock_button),
+                        // The docks are parked off the Graph view, so the toggle has no effect there.
+                        .when(self.center.read(cx).view() == View::Graph, |actions| {
+                            actions.child(right_dock_button)
+                        }),
                 ),
         )
     }
@@ -859,17 +948,23 @@ impl Render for Workspace {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let palette = Palette::of(cx);
         let active = self.center.read(cx).view();
+        let show_toolbar = active == View::Graph && self.toolbar.read(cx).has_repo();
         let vocab = self
             .active
             .and_then(|ix| self.tabs.get(ix))
             .and_then(|tab| crate::hosted::HostedRepo::of_tab(tab.read(cx), cx))
             .and_then(|hosted| hosted.vocab());
+        let conflicts = self
+            .active
+            .and_then(|ix| self.tabs.get(ix))
+            .map_or(0, |tab| tab.read(cx).conflicts.len());
         let rail = ActivityRail::new(active, {
             let this = cx.entity().downgrade();
             move |view, _, cx| {
                 _ = this.update(cx, |this, cx| this.show(view, cx));
             }
         })
+        .conflicts(conflicts)
         .vocab(vocab);
 
         v_flex()
@@ -923,18 +1018,19 @@ impl Render for Workspace {
                 }
             }))
             .child(self.render_title_bar(cx))
-            .when(self.toolbar.read(cx).has_repo(), |d| {
-                d.child(self.toolbar.clone())
-            })
+            // The rail runs the full height under the title bar; everything else stacks to its right.
             .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .w_full()
-                    .child(rail)
-                    .child(div().flex_1().h_full().min_w_0().child(self.dock.clone())),
+                h_flex().flex_1().min_h_0().w_full().child(rail).child(
+                    v_flex()
+                        .flex_1()
+                        .h_full()
+                        .min_w_0()
+                        // The repo toolbar only makes sense next to the graph.
+                        .when(show_toolbar, |d| d.child(self.toolbar.clone()))
+                        .child(div().flex_1().min_h_0().w_full().child(self.dock.clone()))
+                        .child(self.op_strip.clone()),
+                ),
             )
-            .child(self.op_strip.clone())
     }
 }
 

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     App, ClickEvent, Context, ElementId, EventEmitter, FocusHandle, InteractiveElement as _,
@@ -179,7 +180,7 @@ impl Render for Welcome {
             )))
             .child(
                 v_flex()
-                    .child(div().text_xl().text_color(palette.emph).child("GitDragon"))
+                    .child(ui::typography::page_title("GitDragon", cx))
                     .child(
                         div()
                             .text_sm()
@@ -254,7 +255,7 @@ impl Render for Welcome {
             .id("welcome")
             .track_focus(&self.focus)
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .bg(palette.panel)
             .child(
                 v_flex()

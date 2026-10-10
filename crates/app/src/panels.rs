@@ -82,11 +82,20 @@ impl CenterView {
                 if now > 0 && this.seen_conflicts == 0 {
                     this.view = View::Conflicts;
                 }
+                // The rail hides the Conflicts tab once the last conflict is resolved.
+                if now == 0 && this.view == View::Conflicts {
+                    this.view = View::Graph;
+                    this.sync_active(cx);
+                }
                 this.seen_conflicts = now;
                 cx.notify();
             })
         });
         self.repo = repo;
+        // A repository without conflicts has no Conflicts tab to stay on.
+        if self.seen_conflicts == 0 && self.view == View::Conflicts {
+            self.view = View::Graph;
+        }
         // Closed tabs: drop their views (and any running operation).
         self.conflicts.retain(|(tab, _)| tab.upgrade().is_some());
         self.graphs.retain(|(tab, _)| tab.upgrade().is_some());
@@ -306,6 +315,12 @@ impl Panel for CenterView {
             (Some(_), _) => self.view_title(cx),
             (None, _) => "Welcome",
         }
+    }
+
+    /// Only the Graph (and the welcome screen) keeps the dock's title bar; every other view
+    /// draws its own page header, so a second title above it would be a duplicate.
+    fn title_bar(&self, _: &App) -> bool {
+        self.repo.is_none() || self.view == View::Graph
     }
 }
 

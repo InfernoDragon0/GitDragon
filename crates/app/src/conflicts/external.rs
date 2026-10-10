@@ -109,11 +109,10 @@ pub fn write_stages(
     file: &Path,
     stages: &git_core::conflicts::Stages,
 ) -> std::io::Result<StageFiles> {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    let dir = std::env::temp_dir().join(format!("gitdragon-merge-{}-{stamp}", std::process::id()));
-    std::fs::create_dir_all(&dir)?;
+    let dir = tempfile::Builder::new()
+        .prefix("gitdragon-merge-")
+        .tempdir()?
+        .keep();
     let name = file
         .file_name()
         .map_or_else(|| "file".into(), |n| n.to_string_lossy().into_owned());

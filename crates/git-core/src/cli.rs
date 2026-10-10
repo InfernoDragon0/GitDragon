@@ -69,8 +69,12 @@ impl CliRepo {
         }
         if query.all {
             // The stash ref's tip would show with its index / untracked helper commits;
-            // stashes come in through `query.stashes` instead.
-            cmd = cmd.arg("--exclude=refs/stash").arg("--all");
+            // stashes come in through `query.stashes` instead. Fetched pull requests
+            // (`pr_ops::PR_REFS`) are not part of the repository's history.
+            cmd = cmd
+                .arg("--exclude=refs/stash")
+                .arg("--exclude=refs/gitdragon/*")
+                .arg("--all");
         }
         cmd = cmd.arg("--end-of-options");
         for rev in query.revs.iter().chain(&query.stashes) {

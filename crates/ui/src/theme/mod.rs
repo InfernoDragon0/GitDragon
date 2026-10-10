@@ -7,8 +7,9 @@
 //! - [`Palette`] holds the tokens gpui-component has no slot for (panel2, emphasis text, graph
 //!   lanes, signature gradient, `now`), read with [`Palette::of`].
 
+use gpui_kit::component::scroll::ScrollbarMode;
 use gpui_kit::component::{ActiveTheme as _, Theme, ThemeMode, ThemeRegistry};
-use gpui_kit::{App, Global, Hsla, Pixels, px, rgb, rgba};
+use gpui_kit::{App, Global, Hsla, Pixels, SharedString, px, rgb, rgba};
 
 const AURORA_JSON: &str = include_str!("aurora.json");
 const ONYX_JSON: &str = include_str!("onyx.json");
@@ -316,11 +317,90 @@ pub fn set_appearance(appearance: Appearance, cx: &mut App) {
     Theme::update(cx, |theme| {
         theme.dark_theme = dark;
         theme.light_theme = light;
+        // Always-visible scrollbars, so long lists can be dragged to a point.
+        theme.scrollbar_mode = ScrollbarMode::Always;
     });
     // `change` reloads the mode's config even when the mode is unchanged, so a skin swap applies.
     Theme::change(appearance.mode, None, cx);
     // The config just reset the font sizes: scale them again.
     apply_zoom(cx);
+    apply_fonts(cx);
+}
+
+// ---- fonts ------------------------------------------------------------------------------------
+
+/// The font families in use, resolved against what the machine has installed (GPUI panics on a
+/// family it cannot find, so each role picks the first installed candidate).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Fonts {
+    /// Body text (the theme's UI family).
+    pub body: SharedString,
+    /// Page titles and headings.
+    pub display: SharedString,
+    /// Code, hashes, diffs (the theme's mono family).
+    pub mono: SharedString,
+}
+
+impl Global for Fonts {}
+
+/// GPUI's virtual family for the platform UI font; always available.
+const SYSTEM_UI_FONT: &str = ".SystemUIFont";
+
+const BODY_FONTS: &[&str] = if cfg!(target_os = "windows") {
+    &["Segoe UI Variable Text", "Segoe UI"]
+} else {
+    &[SYSTEM_UI_FONT]
+};
+const DISPLAY_FONTS: &[&str] = if cfg!(target_os = "windows") {
+    &["Segoe UI Variable Display", "Segoe UI"]
+} else {
+    &[SYSTEM_UI_FONT]
+};
+const MONO_FONTS: &[&str] = if cfg!(target_os = "windows") {
+    &["Cascadia Code", "Cascadia Mono", "Consolas"]
+} else if cfg!(target_os = "macos") {
+    &["SF Mono", "Menlo", "Monaco"]
+} else {
+    &["DejaVu Sans Mono", "Noto Sans Mono", "Liberation Mono"]
+};
+
+/// The first candidate that is installed, else `current`.
+fn pick_font(candidates: &[&str], installed: &[String], current: &SharedString) -> SharedString {
+    candidates
+        .iter()
+        .find(|name| installed.iter().any(|have| have == **name))
+        .map(|name| SharedString::from(name.to_string()))
+        .unwrap_or_else(|| current.clone())
+}
+
+/// Resolves [`Fonts`] once, then names them on the theme. Runs after every theme change because
+/// reloading a config can reset the families.
+fn apply_fonts(cx: &mut App) {
+    if cx.try_global::<Fonts>().is_none() {
+        let installed = cx.text_system().all_font_names();
+        let theme = cx.theme();
+        let body = pick_font(BODY_FONTS, &installed, &theme.font_family);
+        let fonts = Fonts {
+            display: pick_font(DISPLAY_FONTS, &installed, &body),
+            mono: pick_font(MONO_FONTS, &installed, &theme.mono_font_family),
+            body,
+        };
+        cx.set_global(fonts);
+    }
+    let fonts = cx.global::<Fonts>().clone();
+    Theme::update(cx, |theme| {
+        theme.font_family = fonts.body;
+        theme.mono_font_family = fonts.mono;
+    });
+}
+
+/// The resolved font families (the theme defaults until the theme is initialised).
+pub fn fonts(cx: &App) -> Fonts {
+    cx.try_global::<Fonts>().cloned().unwrap_or_else(|| Fonts {
+        body: SYSTEM_UI_FONT.into(),
+        display: SYSTEM_UI_FONT.into(),
+        mono: SYSTEM_UI_FONT.into(),
+    })
 }
 
 // ---- zoom -------------------------------------------------------------------------------------

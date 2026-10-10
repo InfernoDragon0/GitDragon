@@ -30,6 +30,10 @@ actions!(
         ZoomReset,
         CommandPalette,
         UndoLast,
+        CopyDiffLines,
+        CopyDiffPatch,
+        ClearDiffSelection,
+        PageBack,
     ]
 );
 
@@ -62,6 +66,13 @@ pub fn bind_keys(cx: &mut App) {
         KeyBinding::new("secondary-0", ZoomReset, None),
         KeyBinding::new("secondary-shift-p", CommandPalette, None),
         KeyBinding::new("secondary-alt-z", UndoLast, None),
+        // Only while a diff view has focus (see `diff_select`).
+        KeyBinding::new("secondary-c", CopyDiffLines, Some("DiffView")),
+        KeyBinding::new("secondary-shift-c", CopyDiffPatch, Some("DiffView")),
+        KeyBinding::new("escape", ClearDiffSelection, Some("DiffView")),
+        // Leaves a PR / issue page; deeper contexts (inputs, menus, diffs) take Escape first.
+        KeyBinding::new("escape", PageBack, Some("PrsView")),
+        KeyBinding::new("escape", PageBack, Some("IssuesView")),
     ]);
 }
 

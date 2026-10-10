@@ -4,6 +4,7 @@
 //! panel opens in place of the graph: read-only for a commit, the staging diff for the WIP row.
 
 mod actions;
+mod badges;
 mod details;
 pub(crate) mod format;
 mod lanes;
@@ -26,20 +27,24 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::tooltip::Tooltip;
 use gpui_kit::component::{Disableable as _, Sizable as _};
 use gpui_kit::component::{h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
-    Focusable, Hsla, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point, Render, ScrollHandle,
-    ScrollStrategy, SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
-    UniformListScrollHandle, Window, div, prelude::FluentBuilder as _, uniform_list,
+    Focusable, Hsla, InteractiveElement as _, IntoElement, ListHorizontalSizingBehavior,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement as _, Pixels, Point,
+    Render, ScrollHandle, ScrollStrategy, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder as _, uniform_list,
 };
+use ui::diff::copy::{self as diff_copy, RowSelection};
 use ui::diff::{self as diff_ui, DiffModel, Layout};
 use ui::{Palette, zoomed};
 
 use crate::changes::diff::{StagingDiff, StagingDiffEvent};
+use crate::diff_select::{self, DiffSelect};
 use crate::drag_scroll::DragScroll;
 use crate::repo_tab::RepoTab;
 use link::{GraphLink, LinkEvent};
@@ -151,6 +156,8 @@ pub struct GraphView {
     staging: Entity<StagingDiff>,
     staging_open: bool,
     diff_layout: Layout,
+    /// Rows picked in the open commit file's diff, for copying.
+    diff_sel: RowSelection,
     diff_scroll: UniformListScrollHandle,
     search_input: Entity<InputState>,
     search: Search,
@@ -223,6 +230,7 @@ impl GraphView {
             staging,
             staging_open: false,
             diff_layout: Layout::Unified,
+            diff_sel: RowSelection::default(),
             diff_scroll: UniformListScrollHandle::new(),
             search_input,
             search: Search::default(),
@@ -432,7 +440,8 @@ impl GraphView {
             Some((color, row)) => {
                 let name = match &self.hover {
                     Some(old) if old.color == color && old.row == row => old.name.clone(),
-                    _ => names::lane_name(&self.history, color, row).map(SharedString::from),
+                    _ => names::lane_name(&self.history, color, row)
+                        .map(|name| SharedString::from(ui::sanitize_line(&name).into_owned())),
                 };
                 Some(Hover {
                     color,
@@ -665,8 +674,11 @@ impl GraphView {
                 if let Some(found) = found
                     && !found.is_empty()
                 {
-                    view.descriptions
-                        .extend(found.into_iter().map(|(id, text)| (id, text.into())));
+                    view.descriptions.extend(
+                        found
+                            .into_iter()
+                            .map(|(id, text)| (id, ui::sanitize_line(&text).into_owned().into())),
+                    );
                     cx.notify();
                 }
             });
@@ -825,6 +837,7 @@ impl GraphView {
             _build: build,
         });
         self.diff_scroll.scroll_to_item(0, ScrollStrategy::Top);
+        self.diff_sel.clear();
         cx.notify();
     }
 
@@ -899,6 +912,8 @@ impl GraphView {
                             Layout::Unified => Layout::Split,
                             Layout::Split => Layout::Unified,
                         };
+                        // Row indices differ between the layouts.
+                        this.diff_sel.clear();
                         cx.notify();
                     })),
             );
@@ -920,27 +935,52 @@ impl GraphView {
             Some(model) if model.rows(layout).is_empty() => message("No content changes."),
             Some(model) => {
                 let model = model.clone();
-                uniform_list(
-                    "graph-file-diff",
-                    model.rows(layout).len(),
-                    cx.processor(move |this, range: Range<usize>, _, cx| {
-                        let palette = Palette::of(cx);
-                        range
-                            .filter_map(|ix| {
-                                diff_ui::read_only_row(&model, this.diff_layout, ix, &palette, cx)
-                            })
-                            .collect::<Vec<_>>()
-                    }),
-                )
-                .track_scroll(&self.diff_scroll)
-                .flex_1()
-                .into_any_element()
+                let widest = diff_ui::widest_row(&model, layout);
+                let view = cx.entity().downgrade();
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            "graph-file-diff",
+                            model.rows(layout).len(),
+                            cx.processor(move |this, range: Range<usize>, _, cx| {
+                                let palette = Palette::of(cx);
+                                range
+                                    .filter_map(|ix| {
+                                        let selected = this.diff_sel.contains(ix);
+                                        let row = diff_ui::read_only_row(
+                                            &model,
+                                            this.diff_layout,
+                                            ix,
+                                            selected,
+                                            &palette,
+                                            cx,
+                                        )?;
+                                        Some(diff_select::row(ix, row, cx))
+                                    })
+                                    .collect::<Vec<_>>()
+                            }),
+                        )
+                        .track_scroll(&self.diff_scroll)
+                        // Long lines scroll sideways: the list is as wide as its widest row.
+                        .with_horizontal_sizing_behavior(
+                            ListHorizontalSizingBehavior::Unconstrained,
+                        )
+                        .with_width_from_item(widest)
+                        // Keeps the overlay scrollbars off the rows' right-hand and bottom edges.
+                        .pr_3()
+                        .pb_3()
+                        .flex_1(),
+                    )
+                    .scrollbar(&self.diff_scroll, ScrollbarAxis::Both)
+                    .context_menu(move |menu, _, _| diff_select::menu(menu, view.clone()))
+                    .into_any_element()
             }
         };
         Some(
-            v_flex()
-                .size_full()
-                .track_focus(&self.focus)
+            diff_select::container(v_flex().size_full(), &self.focus, cx)
                 .bg(palette.panel)
                 .child(header)
                 .child(body)
@@ -1018,18 +1058,27 @@ impl GraphView {
                             .map(|a| (a, "Co-author")),
                     )
                     .map(|(a, role)| Person {
-                        name: a.name.clone().into(),
+                        name: ui::sanitize_line(&a.name).into_owned().into(),
                         email: a.email.clone().into(),
                         role,
                         color: palette.lane(format::avatar_slot(&a.email)),
                     })
                     .collect();
-                // `refs/stash` is already said by the stash row's own `stash@{n}` pill.
-                let pills = row
-                    .refs
+                // The most important few badges, then "+N"; the hover lists every ref.
+                let all_badges = badges::badges(row.refs);
+                let more = all_badges.len().saturating_sub(badges::MAX_BADGES);
+                let pills = all_badges
                     .iter()
-                    .filter(|label| !matches!(label, RefLabel::Other(name) if name == "refs/stash"))
-                    .map(|label| pill(label, &palette));
+                    .take(badges::MAX_BADGES)
+                    .map(|badge| badge_pill(badge, &palette))
+                    .chain((more > 0).then(|| pill_text(format!("+{more}"), palette.muted)));
+                let message_tip = (kind != RowKind::Wip).then(|| {
+                    message_tooltip(
+                        ui::sanitize_line(row.subject).into_owned().into(),
+                        row.refs.to_vec(),
+                        palette,
+                    )
+                });
                 let message = match kind {
                     RowKind::Wip => wip_message(counts, &palette).into_any_element(),
                     RowKind::Stash(n) => h_flex()
@@ -1047,19 +1096,17 @@ impl GraphView {
                                 .truncate()
                                 .italic()
                                 .text_color(palette.fg)
-                                .child(SharedString::from(row.subject.to_string())),
+                                .child(SharedString::from(
+                                    ui::sanitize_line(row.subject).into_owned(),
+                                )),
                         )
                         .into_any_element(),
                     RowKind::Commit => h_flex()
                         .min_w_0()
                         .gap_2()
-                        .child(
-                            div()
-                                .min_w_0()
-                                .truncate()
-                                .text_color(palette.emph)
-                                .child(SharedString::from(row.subject.to_string())),
-                        )
+                        .child(div().min_w_0().truncate().text_color(palette.emph).child(
+                            SharedString::from(ui::sanitize_line(row.subject).into_owned()),
+                        ))
                         .when_some(self.descriptions.get(row.id).cloned(), |d, text| {
                             d.child(
                                 div()
@@ -1099,12 +1146,14 @@ impl GraphView {
                         )
                         .child(
                             h_flex()
+                                .id(ElementId::NamedInteger("graph-message".into(), ix as u64))
                                 .flex_1()
                                 .min_w_0()
                                 .gap_1p5()
                                 .overflow_hidden()
                                 .children(pills)
-                                .child(message),
+                                .child(message)
+                                .when_some(message_tip, |d, tip| d.tooltip(tip)),
                         )
                         .child(avatar_stack(ix, people, &palette, cx))
                         .child(
@@ -1146,6 +1195,31 @@ impl GraphView {
     }
 }
 
+impl DiffSelect for GraphView {
+    fn selection(&mut self) -> &mut RowSelection {
+        &mut self.diff_sel
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    fn copy_selection(&mut self, patch: bool, cx: &mut Context<Self>) {
+        let (Some(rows), Some(model)) = (
+            self.diff_sel.range(),
+            self.file.as_ref().and_then(|f| f.model.as_ref()),
+        ) else {
+            return;
+        };
+        let text = if patch {
+            diff_copy::copy_patch(model, self.diff_layout, rows)
+        } else {
+            diff_copy::copy_lines(model, self.diff_layout, rows)
+        };
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
+    }
+}
+
 /// Ref pill (mockup `.ref`): HEAD in green, local branches in the accent, remotes in lane 1,
 /// tags in lane 4.
 fn pill(label: &RefLabel, palette: &Palette) -> AnyElement {
@@ -1157,6 +1231,49 @@ fn pill(label: &RefLabel, palette: &Palette) -> AnyElement {
         RefLabel::Other(name) => (name, palette.muted),
     };
     pill_text(text.to_string(), color)
+}
+
+/// A row's badge: the current branch (or a detached HEAD) in green, else as [`pill`].
+fn badge_pill(badge: &badges::Badge, palette: &Palette) -> AnyElement {
+    match (&badge.label, badge.head) {
+        (RefLabel::LocalBranch(name), true) => pill_text(name.clone(), palette.ok),
+        (label, _) => pill(label, palette),
+    }
+}
+
+/// Hover for a row's message area: the full subject (the row truncates it) and every ref,
+/// HEAD and folded remotes included.
+fn message_tooltip(
+    subject: SharedString,
+    refs: Vec<RefLabel>,
+    palette: Palette,
+) -> impl Fn(&mut Window, &mut App) -> gpui_kit::AnyView + 'static {
+    move |window, cx| {
+        let subject = subject.clone();
+        let refs = refs.clone();
+        Tooltip::element(move |_, _| {
+            // `refs/stash` is already said by the stash row's own `stash@{n}` pill.
+            let pills: Vec<AnyElement> = refs
+                .iter()
+                .filter(|l| !matches!(l, RefLabel::Other(name) if name == "refs/stash"))
+                .map(|label| pill(label, &palette))
+                .collect();
+            v_flex()
+                .max_w(gpui_kit::px(480.))
+                .gap_1p5()
+                .py_0p5()
+                .child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.emph)
+                        .child(subject.clone()),
+                )
+                .when(!pills.is_empty(), |d| {
+                    d.child(h_flex().flex_wrap().gap_1().children(pills))
+                })
+        })
+        .build(window, cx)
+    }
 }
 
 /// The WIP row's message: "WIP" and what is waiting to be committed.
@@ -1203,7 +1320,7 @@ fn pill_text(text: String, color: Hsla) -> AnyElement {
         .text_color(color)
         .max_w_48()
         .truncate()
-        .child(SharedString::from(text))
+        .child(SharedString::from(ui::sanitize_line(&text).into_owned()))
         .into_any_element()
 }
 
@@ -1295,7 +1412,8 @@ fn avatar_stack(ix: usize, people: Vec<Person>, palette: &Palette, cx: &App) -> 
                                     if p.email.is_empty() {
                                         SharedString::from(p.role)
                                     } else {
-                                        format!("{} \u{b7} {}", p.role, p.email).into()
+                                        format!("{} \u{b7} {}", p.role, ui::sanitize_line(&p.email))
+                                            .into()
                                     },
                                 )),
                         )
@@ -1425,8 +1543,13 @@ impl Render for GraphView {
                         }),
                     )
                     .track_scroll(&self.scroll)
+                    // Keeps the overlay scrollbar off the rows' right-hand badges.
+                    .pr_3()
                     .size_full(),
                 )
+                // Painted over the rows; its mouse-down stops propagation, so a thumb drag
+                // never starts the body's drag-scroll.
+                .vertical_scrollbar(&self.scroll)
                 .when_some(self.hover.clone(), |d, hover| {
                     d.child(lane_tooltip(&hover, &palette, cx))
                 })

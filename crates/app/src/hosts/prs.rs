@@ -1,7 +1,9 @@
 //! The pull request (merge request) view of one repository tab: a filterable, paged list with
-//! state chips, labels and CI dots on the left, the selected one's details on the right
-//! (branches, description, checks, open in browser, check out its branch), and the create
-//! dialog. Data comes only from the `GitHost` trait; the words from its `HostVocab`.
+//! state chips, labels and CI dots. Opening one (click, Enter) replaces the list with its page
+//! (description, conversation, reviews, inline comments, checks, branches, check out) beside a
+//! compact copy of the list; Back (Esc, mouse back) returns to the full list as it was. Plus
+//! the create dialog. Data comes only from the `GitHost` trait; the words from its
+//! `HostVocab`.
 
 use std::collections::HashMap;
 use std::ops::Range;
@@ -9,34 +11,48 @@ use std::time::{Duration, Instant};
 
 use ::hosts::{
     CiState, CiStatus, Feature, HostVocab, ListQuery, PollSchedule, PullRequest, StateFilter,
-    WebTarget,
+    Thread, WebTarget,
 };
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
+use gpui_kit::component::input::Escape as InputEscape;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
-    prelude::FluentBuilder as _, px, uniform_list,
+    AnyElement, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
+    InteractiveElement as _, IntoElement, KeyDownEvent, MouseButton, MouseDownEvent,
+    NavigationDirection, ParentElement as _, Render, ScrollStrategy, SharedString,
+    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
+    Window, div, prelude::FluentBuilder as _, px, uniform_list,
 };
 use ui::{Palette, zoomed};
 
+use super::changes::{ChangesRequest, ChangesView};
+use super::conversation::ConversationView;
 use super::logic::{self, CheckoutPlan, Chip, ListModel};
 use super::new_pr::{NewPrEvent, NewPrForm};
+use super::page::{self, DetailPage, SideRow, WidthProbe};
 use super::{Link, dot, empty_panel, error_banner, label_pill, pill, resolve};
+use crate::actions::{ClearDiffSelection, PageBack};
 use crate::hosted::HostedRepo;
 use crate::repo_tab::RepoTab;
 
 const ROW_HEIGHT: f32 = 50.;
-const DETAIL_WIDTH: f32 = 440.;
 /// The refresh timer wakes this often to see whether a refresh is due.
 const TICK: Duration = Duration::from_secs(15);
 /// CI lookups running at once.
 const MAX_CI: usize = 4;
-/// Longest description drawn (hosts allow 64k+; the rest is one click away in the browser).
-const MAX_BODY: usize = 20_000;
 const PAGE_SIZE: u8 = 30;
+/// Fetched pull requests (`refs/gitdragon/pr/*`) whose head is older than this are dropped
+/// when the view first sees the repository.
+const PR_REFS_MAX_AGE: Duration = Duration::from_secs(14 * 86_400);
+
+/// The reading column of an open page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum PageTab {
+    Conversation,
+    Changes,
+}
 
 /// What is known of one commit's CI.
 struct CiEntry {
@@ -60,9 +76,27 @@ pub struct PrsView {
     me_task: Option<Task<()>>,
     list: ListModel<PullRequest>,
     list_task: Option<Task<()>>,
+    /// The highlighted row (kept while a page is open, so Back lands on it).
     selected: Option<u64>,
-    /// Select this one when the next load brings it (just created).
+    /// The pull request whose page replaces the list.
+    open: Option<u64>,
+    /// Open this one when the next load brings it (just created, revealed).
     select_after: Option<u64>,
+    conversation: Entity<ConversationView>,
+    /// The Changes tab (kept across pages, like the tab choice).
+    changes: Entity<ChangesView>,
+    page_tab: PageTab,
+    /// Old fetched pull requests were pruned for this view's repository.
+    pruned: bool,
+    focus: FocusHandle,
+    /// The compact list beside an open page.
+    side_scroll: UniformListScrollHandle,
+    /// The user folded the side list (kept for the session).
+    side_folded: bool,
+    /// The user unfolded it on a narrow panel.
+    side_pinned: bool,
+    panel_probe: WidthProbe,
+    page_probe: WidthProbe,
     ci: HashMap<String, CiEntry>,
     ci_epoch: u64,
     ci_inflight: usize,
@@ -122,7 +156,18 @@ impl PrsView {
             list: ListModel::default(),
             list_task: None,
             selected: None,
+            open: None,
             select_after: None,
+            conversation: cx.new(|_| ConversationView::new()),
+            changes: cx.new(ChangesView::new),
+            page_tab: PageTab::Conversation,
+            pruned: false,
+            focus: cx.focus_handle(),
+            side_scroll: UniformListScrollHandle::new(),
+            side_folded: false,
+            side_pinned: false,
+            panel_probe: WidthProbe::new(page::WIDE_PANEL),
+            page_probe: WidthProbe::new(page::WIDE_PAGE),
             ci: HashMap::new(),
             ci_epoch: 0,
             ci_inflight: 0,
@@ -151,6 +196,16 @@ impl PrsView {
         if tab.generation == 0 {
             return;
         }
+        if !self.pruned
+            && let Some(repo) = tab.repo.clone()
+        {
+            self.pruned = true;
+            // Best effort housekeeping, off the UI thread.
+            cx.background_executor()
+                .spawn(async move { _ = repo.prune_pr_refs(PR_REFS_MAX_AGE).await })
+                .detach();
+        }
+        let tab = self.tab.read(cx);
         let sig: Vec<(String, Option<String>)> = tab
             .remotes
             .iter()
@@ -172,6 +227,8 @@ impl PrsView {
         self.ci.clear();
         self.ci_inflight = 0;
         self.selected = None;
+        self.open = None;
+        self.changes.update(cx, |c, _| c.hide());
         self.me = None;
         self.me_task = None;
         self.notice = None;
@@ -241,6 +298,10 @@ impl PrsView {
         };
         if manual {
             session.host.invalidate(Some(&session.repo));
+            if self.open.is_some() {
+                self.conversation.update(cx, |c, cx| c.reload(cx));
+                self.changes.update(cx, |c, cx| c.reload(cx));
+            }
         }
         self.ci_epoch += 1;
         self.load(1, false, cx);
@@ -292,6 +353,7 @@ impl PrsView {
             && self.list.items.iter().any(|p| p.number == number)
         {
             self.selected = Some(number);
+            self.open = Some(number);
         }
         cx.notify();
     }
@@ -301,6 +363,7 @@ impl PrsView {
     pub fn reveal(&mut self, number: u64, cx: &mut Context<Self>) {
         if self.list.items.iter().any(|p| p.number == number) {
             self.selected = Some(number);
+            self.open = Some(number);
             cx.notify();
         } else {
             self.select_after = Some(number);
@@ -315,6 +378,7 @@ impl PrsView {
         self.filter = filter;
         self.list.reset();
         self.selected = None;
+        self.open = None;
         self.load(1, false, cx);
     }
 
@@ -408,19 +472,74 @@ impl PrsView {
 
     // ---- actions ----------------------------------------------------------------------
 
-    fn selected_pr(&self) -> Option<PullRequest> {
-        let number = self.selected?;
+    fn open_pr(&self) -> Option<PullRequest> {
+        let number = self.open?;
         self.list.items.iter().find(|p| p.number == number).cloned()
     }
 
-    fn open_in_browser(&self, pr: &PullRequest, cx: &mut Context<Self>) {
-        let url = self
-            .session()
-            .and_then(|s| s.host.web_url(&s.repo, &WebTarget::PullRequest(pr.number)))
-            .unwrap_or_else(|| pr.web_url.clone());
-        if !url.is_empty() {
-            cx.open_url(&url);
+    /// Opens `number`'s page (from the list, the side list or a key). Both lists follow, so
+    /// Back lands on the last one opened.
+    fn open_page(&mut self, number: u64, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open != Some(number) {
+            self.notice = None;
         }
+        self.selected = Some(number);
+        self.open = Some(number);
+        if let Some(ix) = self.visible().iter().position(|p| p.number == number) {
+            self.scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+            self.side_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// Back to the list: the selection and the list's scroll offset are as they were (the
+    /// scroll handle outlives the page).
+    fn back(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.open.take().is_none() {
+            return;
+        }
+        self.conversation.update(cx, |c, _| c.hide());
+        self.changes.update(cx, |c, _| c.hide());
+        self.notice = None;
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    /// On the list: Up / Down move the selection, Enter opens it. On a page: Alt+Up / Alt+Down open the previous / next item.
+    fn on_key(&mut self, event: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let rows: Vec<u64> = self.visible().iter().map(|p| p.number).collect();
+        let at = self
+            .selected
+            .and_then(|n| rows.iter().position(|r| *r == n));
+        if self.open.is_some() {
+            match key {
+                "up" | "down" if event.keystroke.modifiers.alt => {
+                    if let Some(to) = logic::step(at, rows.len(), key == "down") {
+                        self.open_page(rows[to], window, cx);
+                    }
+                }
+                _ => return,
+            }
+            cx.stop_propagation();
+            return;
+        }
+        match key {
+            "up" | "down" => {
+                if let Some(to) = logic::step(at, rows.len(), key == "down") {
+                    self.selected = Some(rows[to]);
+                    self.scroll.scroll_to_item(to, ScrollStrategy::Nearest);
+                    cx.notify();
+                }
+            }
+            "enter" => match at {
+                Some(ix) => self.open_page(rows[ix], window, cx),
+                None => return,
+            },
+            _ => return,
+        }
+        cx.stop_propagation();
     }
 
     /// Fetches the pull request's branch and switches to it (a tab operation, so it shows in
@@ -514,6 +633,7 @@ impl Render for PrsView {
                 &self.vocab.pull_requests.to_lowercase(),
                 &palette,
                 "pr-empty",
+                cx,
             ),
             Link::Ready(_) => self.render_ready(&palette, cx),
         }
@@ -563,10 +683,57 @@ fn ci_word(state: CiState) -> &'static str {
 
 impl PrsView {
     fn render_ready(&mut self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let content = match self.open_pr() {
+            Some(pr) => self.render_open(pr, palette, cx),
+            None => self.render_list(palette, cx),
+        };
+        div()
+            .id("prs-root")
+            .key_context("PrsView")
+            .track_focus(&self.focus)
+            .size_full()
+            .on_key_down(
+                cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                    this.on_key(event, window, cx)
+                }),
+            )
+            .on_action(cx.listener(|this, _: &PageBack, window, cx| {
+                if this.open.is_some() {
+                    this.back(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            // A diff with nothing selected lets Escape through (see `diff_select`).
+            .on_action(cx.listener(|this, _: &ClearDiffSelection, window, cx| {
+                if this.open.is_some() {
+                    this.back(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            // A text input that has nothing to dismiss passes Escape on: it blurs.
+            .on_action(cx.listener(|this, _: &InputEscape, window, cx| {
+                if this.open.is_some() {
+                    this.focus.focus(window, cx);
+                } else {
+                    cx.propagate();
+                }
+            }))
+            .on_mouse_down(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _: &MouseDownEvent, window, cx| this.back(window, cx)),
+            )
+            .child(content)
+            .into_any_element()
+    }
+
+    fn render_list(&mut self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
         let supports_create = self
             .session()
             .is_some_and(|s| s.host.supports(Feature::CreatePullRequest));
-        let toolbar = self.render_toolbar(palette, supports_create, cx);
+        let header = self.render_header(palette, supports_create, cx);
+        let toolbar = self.render_toolbar(palette, cx);
         let banner = self.list.error.clone().map(|error| {
             error_banner(&error, palette, "pr-error", {
                 let this = cx.entity().downgrade();
@@ -601,53 +768,139 @@ impl PrsView {
                 .child(SharedString::from(text))
                 .into_any_element()
         } else {
-            uniform_list(
-                "pr-rows",
-                count,
-                cx.processor(|this, range: Range<usize>, _, cx| this.render_rows(range, cx)),
-            )
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .into_any_element()
+            v_flex()
+                .relative()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "pr-rows",
+                        count,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            this.render_rows(range, cx)
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    // Keeps the overlay scrollbar off the rows' right-hand badges.
+                    .pr_3()
+                    .w_full()
+                    .flex_1(),
+                )
+                .vertical_scrollbar(&self.scroll)
+                .into_any_element()
         };
-        let detail = self
-            .selected_pr()
-            .map(|pr| self.render_detail(pr, palette, cx));
         v_flex()
             .id("prs-view")
             .size_full()
             .bg(palette.panel)
+            .child(header)
             .child(toolbar)
             .children(banner)
-            .child(
-                h_flex()
-                    .flex_1()
-                    .min_h_0()
-                    .child(v_flex().flex_1().min_w_0().h_full().child(list))
-                    .children(detail),
-            )
+            .child(v_flex().flex_1().min_h_0().w_full().child(list))
             .into_any_element()
     }
 
-    fn render_toolbar(
+    /// An open pull request: the compact list on the left (unless folded or the panel is
+    /// narrow), its page beside it.
+    fn render_open(
+        &mut self,
+        pr: PullRequest,
+        palette: &Palette,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let show_side = !self.side_folded && (self.panel_probe.wide() || self.side_pinned);
+        let side = show_side.then(|| {
+            let count = self.visible().len();
+            let list = v_flex()
+                .relative()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "pr-side-rows",
+                        count,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            this.render_side_rows(range, cx)
+                        }),
+                    )
+                    .track_scroll(&self.side_scroll)
+                    .pr_3()
+                    .w_full()
+                    .flex_1(),
+                )
+                .vertical_scrollbar(&self.side_scroll)
+                .into_any_element();
+            page::side_column(
+                self.vocab.pull_requests,
+                list,
+                palette,
+                cx,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.side_folded = true;
+                    this.side_pinned = false;
+                    cx.notify();
+                }),
+            )
+        });
+        let unfold = (!show_side).then(|| {
+            page::unfold_button(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.side_folded = false;
+                this.side_pinned = !this.panel_probe.wide();
+                cx.notify();
+            }))
+        });
+        let page = self.render_detail(pr, unfold, palette, cx);
+        h_flex()
+            .relative()
+            .size_full()
+            .bg(palette.panel)
+            .child(self.panel_probe.element())
+            .children(side)
+            .child(div().flex_1().min_w_0().h_full().child(page))
+            .into_any_element()
+    }
+
+    fn render_side_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let palette = Palette::of(cx);
+        let rows: Vec<PullRequest> = self.visible().into_iter().cloned().collect();
+        range
+            .filter_map(|ix| {
+                let pr = rows.get(ix)?;
+                let chip = logic::chip(pr);
+                let number = pr.number;
+                let row = SideRow {
+                    number,
+                    title: pr.title.clone(),
+                    author: pr
+                        .author
+                        .as_ref()
+                        .map_or("unknown".into(), |a| a.login.clone()),
+                    state: chip.label().into(),
+                    color: chip_color(chip, &palette),
+                };
+                Some(page::side_row(
+                    ix,
+                    row,
+                    self.open == Some(number),
+                    &palette,
+                    cx,
+                    cx.listener(move |this, _: &ClickEvent, window, cx| {
+                        this.open_page(number, window, cx)
+                    }),
+                ))
+            })
+            .collect()
+    }
+
+    /// The page header: title and subtitle, with the status, Refresh and New buttons at the end.
+    fn render_header(
         &self,
         palette: &Palette,
         supports_create: bool,
         cx: &mut Context<Self>,
     ) -> AnyElement {
-        let filter_button = |id: &'static str, label: &'static str, value: StateFilter| {
-            Button::new(id)
-                .xsmall()
-                .label(label)
-                .with_variant(if self.filter == value {
-                    ButtonVariant::Primary
-                } else {
-                    ButtonVariant::Ghost
-                })
-                .on_click(
-                    cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(value, cx)),
-                )
-        };
         let status = if self.list.loading {
             "Loading\u{2026}".to_string()
         } else {
@@ -665,42 +918,17 @@ impl PrsView {
         };
         let shown = self.visible().len();
         let new_label = format!("New {}", self.vocab.pull_request.to_lowercase());
-        h_flex()
-            .id("pr-toolbar")
-            .flex_none()
-            .h(zoomed(38., cx))
-            .px_2()
-            .gap_1()
-            .border_b_1()
-            .border_color(palette.border)
-            .child(
-                div()
-                    .px_1()
-                    .text_sm()
-                    .text_color(palette.emph)
-                    .child(self.vocab.pull_requests),
-            )
-            .child(filter_button("pr-filter-open", "Open", StateFilter::Open))
-            .child(filter_button(
-                "pr-filter-closed",
-                "Closed",
-                StateFilter::Closed,
-            ))
-            .child(filter_button("pr-filter-all", "All", StateFilter::All))
-            .child(div().w_px().h(zoomed(18., cx)).mx_1().bg(palette.border))
-            .child(
-                Button::new("pr-filter-mine")
-                    .xsmall()
-                    .label("Mine")
-                    .with_variant(if self.mine {
-                        ButtonVariant::Primary
-                    } else {
-                        ButtonVariant::Ghost
-                    })
-                    .loading(self.mine && self.me.is_none() && self.me_task.is_some())
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_mine(cx))),
-            )
-            .child(div().flex_1())
+        let subtitle = match self.session() {
+            Some(session) => format!(
+                "Review and check out {} for {}.",
+                self.vocab.pull_requests.to_lowercase(),
+                super::repo_slug(&session.repo)
+            ),
+            None => format!("Sign in to see {}.", self.vocab.pull_requests.to_lowercase()),
+        };
+        let right = h_flex()
+            .gap_2()
+            .items_center()
             .child(
                 div()
                     .text_xs()
@@ -732,6 +960,54 @@ impl PrsView {
                         })),
                 )
             })
+            .into_any_element();
+        crate::page_header::page_header(self.vocab.pull_requests, subtitle, Some(right), cx)
+            .into_any_element()
+    }
+
+    /// The filter row under the header.
+    fn render_toolbar(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let filter_button = |id: &'static str, label: &'static str, value: StateFilter| {
+            Button::new(id)
+                .xsmall()
+                .label(label)
+                .with_variant(if self.filter == value {
+                    ButtonVariant::Primary
+                } else {
+                    ButtonVariant::Ghost
+                })
+                .on_click(
+                    cx.listener(move |this, _: &ClickEvent, _, cx| this.set_filter(value, cx)),
+                )
+        };
+        h_flex()
+            .id("pr-toolbar")
+            .flex_none()
+            .h(zoomed(38., cx))
+            .px_2()
+            .gap_1()
+            .border_b_1()
+            .border_color(palette.border)
+            .child(filter_button("pr-filter-open", "Open", StateFilter::Open))
+            .child(filter_button(
+                "pr-filter-closed",
+                "Closed",
+                StateFilter::Closed,
+            ))
+            .child(filter_button("pr-filter-all", "All", StateFilter::All))
+            .child(div().w_px().h(zoomed(18., cx)).mx_1().bg(palette.border))
+            .child(
+                Button::new("pr-filter-mine")
+                    .xsmall()
+                    .label("Mine")
+                    .with_variant(if self.mine {
+                        ButtonVariant::Primary
+                    } else {
+                        ButtonVariant::Ghost
+                    })
+                    .loading(self.mine && self.me.is_none() && self.me_task.is_some())
+                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| this.toggle_mine(cx))),
+            )
             .into_any_element()
     }
 
@@ -806,6 +1082,7 @@ impl PrsView {
         h_flex()
             .id(ElementId::NamedInteger("pr-row".into(), ix as u64))
             .h(height)
+            .w_full()
             .px_3()
             .gap_2()
             .cursor_pointer()
@@ -821,6 +1098,7 @@ impl PrsView {
                     .gap_0p5()
                     .child(
                         h_flex()
+                            .w_full()
                             .gap_1p5()
                             .min_w_0()
                             .child(
@@ -832,29 +1110,36 @@ impl PrsView {
                             )
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate()
                                     .text_sm()
                                     .text_color(palette.emph)
-                                    .child(SharedString::from(pr.title.clone())),
+                                    .child(SharedString::from(
+                                        ui::sanitize_line(&pr.title).into_owned(),
+                                    )),
                             ),
                     )
                     .child(
                         h_flex()
+                            .w_full()
                             .gap_1p5()
                             .min_w_0()
                             .text_xs()
                             .text_color(palette.muted)
                             .child(
-                                div()
-                                    .flex_none()
-                                    .child(SharedString::from(author.to_string())),
+                                div().flex_none().child(SharedString::from(
+                                    ui::sanitize_line(author).into_owned(),
+                                )),
                             )
                             .child(
                                 div()
+                                    .flex_1()
                                     .min_w_0()
                                     .truncate()
-                                    .child(SharedString::from(branches)),
+                                    .child(SharedString::from(
+                                        ui::sanitize_line(&branches).into_owned(),
+                                    )),
                             )
                             .children(
                                 pr.labels
@@ -870,21 +1155,93 @@ impl PrsView {
                     ),
             )
             .child(pill(chip.label(), chip_color(chip, palette), palette))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                this.selected = Some(number);
-                this.notice = None;
-                cx.notify();
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.open_page(number, window, cx)
             }))
+            .into_any_element()
+    }
+
+    /// "Conversation | Changes (N files)" over the reading column.
+    fn render_page_tabs(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
+        let changes = match self.changes.read(cx).file_count() {
+            Some(1) => "Changes (1 file)".to_string(),
+            Some(n) => format!("Changes ({n} files)"),
+            None => "Changes".to_string(),
+        };
+        let tab = |id: &'static str, label: String, value: PageTab| {
+            let on = self.page_tab == value;
+            div()
+                .id(id)
+                .pb_1p5()
+                .text_sm()
+                .cursor_pointer()
+                .border_b_2()
+                .when(on, |d| {
+                    d.border_color(palette.accent).text_color(palette.emph)
+                })
+                .when(!on, |d| {
+                    d.border_color(gpui_kit::transparent_black())
+                        .text_color(palette.muted)
+                        .hover(|s| s.text_color(palette.fg))
+                })
+                .child(SharedString::from(label))
+                .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                    this.page_tab = value;
+                    cx.notify();
+                }))
+        };
+        h_flex()
+            .w_full()
+            .gap_4()
+            .border_b_1()
+            .border_color(palette.border)
+            .child(tab(
+                "pr-tab-conversation",
+                "Conversation".to_string(),
+                PageTab::Conversation,
+            ))
+            .child(tab("pr-tab-changes", changes, PageTab::Changes))
             .into_any_element()
     }
 
     fn render_detail(
         &mut self,
         pr: PullRequest,
+        unfold: Option<AnyElement>,
         palette: &Palette,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         self.request_ci(&pr.head_sha, cx);
+        let number = pr.number;
+        if let Some(session) = self.session().cloned() {
+            super::conversation::seed_head(
+                Thread::PullRequest(number),
+                pr.author.iter().cloned().collect(),
+                cx,
+            );
+            self.conversation.update(cx, |c, cx| {
+                c.show(&session, Thread::PullRequest(number), cx)
+            });
+            // Fetched only once the Changes tab is shown; another pull request stops the old fetch.
+            if self.page_tab == PageTab::Changes {
+                let repo = self.tab.read(cx).repo.clone();
+                let short = self.vocab.pr_short;
+                self.changes.update(cx, |c, cx| {
+                    c.show(
+                        ChangesRequest {
+                            repo,
+                            session: &session,
+                            pr: &pr,
+                            short,
+                        },
+                        cx,
+                    )
+                });
+            } else {
+                self.changes
+                    .update(cx, |c, _| c.retarget(number, &pr.head_sha));
+            }
+        }
         let now = logic::now_secs();
         let chip = logic::chip(&pr);
         let busy = self.tab.read(cx).is_busy();
@@ -896,12 +1253,6 @@ impl PrsView {
             Some(fork) => format!("{fork}:{} \u{2192} {}", pr.source_branch, pr.target_branch),
             None => format!("{} \u{2192} {}", pr.source_branch, pr.target_branch),
         };
-        let body = pr
-            .body
-            .as_deref()
-            .map(str::trim)
-            .filter(|b| !b.is_empty())
-            .map(|b| b.chars().take(MAX_BODY).collect::<String>());
         let can_checkout =
             pr.state == ::hosts::PrState::Open || pr.state == ::hosts::PrState::Merged;
         let entry = self.ci.get(&pr.head_sha);
@@ -914,95 +1265,30 @@ impl PrsView {
         let supports_ci = self
             .session()
             .is_some_and(|s| s.host.supports(Feature::CiStatus));
-        let pr_for_open = pr.clone();
+        let web_url = self
+            .session()
+            .and_then(|s| s.host.web_url(&s.repo, &WebTarget::PullRequest(number)))
+            .or_else(|| Some(pr.web_url.clone()).filter(|u| !u.is_empty()));
         let pr_for_checkout = pr.clone();
 
-        let header =
-            v_flex()
-                .gap_1()
-                .child(
-                    div()
-                        .text_base()
-                        .text_color(palette.emph)
-                        .child(SharedString::from(format!("{} #{}", pr.title, pr.number))),
-                )
-                .child(
-                    h_flex()
-                        .gap_2()
-                        .flex_wrap()
-                        .child(pill(chip.label(), chip_color(chip, palette), palette))
-                        .child(div().text_xs().text_color(palette.muted).child(
-                            SharedString::from(format!(
-                                "{author} \u{b7} updated {}",
-                                logic::ago(&pr.updated_at, now)
-                            )),
-                        )),
-                )
-                .child(
-                    div()
-                        .text_xs()
-                        .text_color(palette.fg)
-                        .child(SharedString::from(branches)),
-                )
-                .when(!pr.labels.is_empty(), |d| {
-                    d.child(
-                        h_flex().gap_1().flex_wrap().children(
-                            pr.labels
-                                .iter()
-                                .map(|l| label_pill(l, palette).into_any_element()),
-                        ),
-                    )
-                });
-
-        let actions = h_flex()
-            .gap_2()
-            .child(
-                Button::new("pr-open-web")
-                    .small()
-                    .outline()
-                    .label("Open in browser")
-                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                        this.open_in_browser(&pr_for_open, cx)
-                    })),
-            )
-            .when(can_checkout, |d| {
-                d.child(
-                    Button::new("pr-checkout")
-                        .small()
-                        .primary()
-                        .icon(IconName::GitBranch)
-                        .label("Check out branch")
-                        .disabled(busy)
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.checkout(&pr_for_checkout, cx)
-                        })),
-                )
-            });
-
-        let description = v_flex()
-            .gap_1()
-            .text_sm()
-            .text_color(palette.fg)
-            .children(match &body {
-                Some(text) => text
-                    .lines()
-                    .map(|line| {
-                        if line.trim().is_empty() {
-                            div().h(px(6.)).into_any_element()
-                        } else {
-                            div()
-                                .child(SharedString::from(line.trim_end().to_string()))
-                                .into_any_element()
-                        }
-                    })
-                    .collect::<Vec<_>>(),
-                None => vec![
-                    div()
-                        .text_color(palette.muted)
-                        .child("No description.")
-                        .into_any_element(),
-                ],
-            });
+        let mut chips = vec![
+            pill(chip.label(), chip_color(chip, palette), palette).into_any_element(),
+            div()
+                .text_xs()
+                .text_color(palette.muted)
+                .child(SharedString::from(format!(
+                    "{} opened {} \u{b7} updated {}",
+                    ui::sanitize_line(&author),
+                    logic::ago(&pr.created_at, now),
+                    logic::ago(&pr.updated_at, now)
+                )))
+                .into_any_element(),
+        ];
+        chips.extend(
+            pr.labels
+                .iter()
+                .map(|l| label_pill(l, palette).into_any_element()),
+        );
 
         let checks_block = supports_ci.then(|| {
             v_flex()
@@ -1044,64 +1330,84 @@ impl PrsView {
                                 .truncate()
                                 .text_xs()
                                 .text_color(palette.fg)
-                                .child(SharedString::from(match &check.description {
-                                    Some(text) if !text.is_empty() => {
-                                        format!("{} \u{b7} {text}", check.name)
-                                    }
-                                    _ => check.name.clone(),
-                                })),
+                                .child(SharedString::from(
+                                    ui::sanitize_line(&match &check.description {
+                                        Some(text) if !text.is_empty() => {
+                                            format!("{} \u{b7} {text}", check.name)
+                                        }
+                                        _ => check.name.clone(),
+                                    })
+                                    .into_owned(),
+                                )),
                         )
-                        .on_click(move |_: &ClickEvent, _, cx| {
+                        .on_click(move |_: &ClickEvent, window, cx| {
                             if let Some(url) = &url {
-                                cx.open_url(url);
+                                crate::links::open(url, Some(window), cx);
                             }
                         })
                 }))
         });
 
-        let close = cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.selected = None;
-            cx.notify();
-        });
-        v_flex()
-            .id("pr-detail")
-            .flex_none()
-            .w(px(DETAIL_WIDTH))
-            .h_full()
-            .border_l_1()
-            .border_color(palette.border)
-            .bg(palette.panel2)
-            .child(
-                h_flex().flex_none().justify_end().px_2().pt_1().child(
-                    Button::new("pr-detail-close")
-                        .xsmall()
-                        .ghost()
-                        .icon(IconName::X)
-                        .tooltip("Close details")
-                        .on_click(close),
-                ),
-            )
-            .child(
-                v_flex()
-                    .id("pr-detail-scroll")
-                    .flex_1()
-                    .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .pb_3()
-                    .gap_3()
-                    .child(header)
-                    .child(actions)
-                    .children(self.notice.clone().map(|text| {
-                        div()
-                            .text_xs()
-                            .text_color(palette.warn)
-                            .child(text)
-                            .into_any_element()
+        let mut side = vec![page::side_block(
+            "Branches",
+            div()
+                .text_xs()
+                .text_color(palette.fg)
+                .child(SharedString::from(
+                    ui::sanitize_line(&branches).into_owned(),
+                )),
+            cx,
+        )];
+        if can_checkout {
+            side.push(
+                Button::new("pr-checkout")
+                    .small()
+                    .primary()
+                    .icon(IconName::GitBranch)
+                    .label("Check out branch")
+                    .disabled(busy)
+                    .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
+                        this.checkout(&pr_for_checkout, cx)
                     }))
-                    .children(checks_block)
-                    .child(description),
-            )
-            .into_any_element()
+                    .into_any_element(),
+            );
+        }
+        side.extend(self.notice.clone().map(|text| {
+            div()
+                .text_xs()
+                .text_color(palette.warn)
+                .child(SharedString::from(ui::sanitize_display(&text).into_owned()))
+                .into_any_element()
+        }));
+        side.extend(checks_block.map(IntoElement::into_any_element));
+
+        let mut main = vec![self.render_page_tabs(palette, cx)];
+        match self.page_tab {
+            PageTab::Conversation => {
+                main.push(page::description(
+                    pr.body.as_deref(),
+                    ElementId::NamedInteger("pr-body".into(), number),
+                    palette,
+                ));
+                main.push(self.conversation.clone().into_any_element());
+            }
+            PageTab::Changes => main.push(self.changes.clone().into_any_element()),
+        }
+        page::render(
+            DetailPage {
+                id: ElementId::NamedInteger("pr-page".into(), number),
+                title: pr.title.clone(),
+                number,
+                chips,
+                web_url,
+                main,
+                side,
+                leading: unfold.into_iter().collect(),
+            },
+            &self.page_probe,
+            cx.listener(|this, _: &ClickEvent, window, cx| this.back(window, cx)),
+            palette,
+            cx,
+        )
     }
 }

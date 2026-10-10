@@ -115,6 +115,17 @@ impl<T> ListModel<T> {
     }
 }
 
+/// The row after (`down`) or before the one at `at` in a list of `len`, clamped at the ends;
+/// the first row when none is selected; `None` for an empty list.
+pub fn step(at: Option<usize>, len: usize, down: bool) -> Option<usize> {
+    let last = len.checked_sub(1)?;
+    Some(match at {
+        Some(ix) if down => (ix + 1).min(last),
+        Some(ix) => ix.saturating_sub(1).min(last),
+        None => 0,
+    })
+}
+
 // ---- filters and chips ------------------------------------------------------------------
 
 /// The coloured state word on a pull request row.
@@ -434,6 +445,7 @@ mod tests {
             source_repo: None,
             target_branch: "main".into(),
             head_sha: format!("sha{number}"),
+            base_sha: None,
             labels: vec![],
             web_url: String::new(),
             created_at: String::new(),
@@ -509,9 +521,19 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_steps() {
+        assert_eq!(step(None, 0, true), None);
+        assert_eq!(step(None, 3, false), Some(0));
+        assert_eq!(step(Some(0), 3, true), Some(1));
+        assert_eq!(step(Some(2), 3, true), Some(2));
+        assert_eq!(step(Some(0), 3, false), Some(0));
+        assert_eq!(step(Some(2), 3, false), Some(1));
+    }
+
+    #[test]
     fn list_model_pages_and_stale_errors() {
         let mut list = ListModel::<u64>::default();
-        let page = |items: Vec<u64>, next| Page { items, next };
+        let page = |items: Vec<u64>, next| Page::new(items, next);
         let r = list.begin();
         assert!(list.loading);
         assert!(list.finish(r, Ok(page(vec![1, 2], Some(2))), false, |n| *n, 100));

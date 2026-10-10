@@ -7,11 +7,16 @@
 //! - [`issues`]: list, detail, comment, close / reopen.
 //! - [`new_issue`]: the create dialog.
 //! - [`logic`]: the pure parts (list state, filters, prefill, checkout plan), unit tested.
+//! - [`page`]: the full-panel page an opened issue / pull request replaces the list with.
+//! - [`conversation`]: its timeline, reviews and inline comments, each loading on its own.
 
+pub mod changes;
+pub mod conversation;
 pub mod issues;
 pub mod logic;
 pub mod new_issue;
 pub mod new_pr;
+pub mod page;
 pub mod prs;
 
 use ::hosts::{Feature, Label, RepoId};
@@ -149,6 +154,14 @@ fn no_account(repo: &RepoId) -> Empty {
     }
 }
 
+/// `owner/repo` for a page header's subtitle (Azure DevOps adds its project).
+pub fn repo_slug(repo: &RepoId) -> String {
+    match &repo.project {
+        Some(project) => format!("{}/{}/{}", repo.owner, project, repo.repo),
+        None => format!("{}/{}", repo.owner, repo.repo),
+    }
+}
+
 /// The friendly empty state: what is missing, and a way to Settings when that helps.
 pub fn empty_panel(
     empty: &Empty,
@@ -156,6 +169,7 @@ pub fn empty_panel(
     noun: &str,
     palette: &Palette,
     id: &'static str,
+    cx: &App,
 ) -> AnyElement {
     let (title, body) = empty.text(title, noun);
     v_flex()
@@ -167,12 +181,7 @@ pub fn empty_panel(
         .px_4()
         .text_center()
         .bg(palette.panel)
-        .child(
-            div()
-                .text_lg()
-                .text_color(palette.emph)
-                .child(SharedString::from(title)),
-        )
+        .child(ui::typography::page_title(title, cx))
         .child(
             div()
                 .text_sm()
@@ -217,7 +226,9 @@ pub fn error_banner(
                 .min_w_0()
                 .text_xs()
                 .text_color(palette.error)
-                .child(SharedString::from(error.message.clone())),
+                .child(SharedString::from(
+                    ui::sanitize_display(&error.message).into_owned(),
+                )),
         )
         .child(if error.auth {
             Button::new(SharedString::from(format!("{id}-settings")))
@@ -265,7 +276,7 @@ pub fn pill(text: impl Into<SharedString>, color: Hsla, palette: &Palette) -> im
 /// A host label as a pill in its own colour.
 pub fn label_pill(label: &Label, palette: &Palette) -> impl IntoElement {
     pill(
-        SharedString::from(label.name.clone()),
+        SharedString::from(ui::sanitize_line(&label.name).into_owned()),
         label_color(label.color.as_deref()).unwrap_or(palette.muted),
         palette,
     )

@@ -509,7 +509,8 @@ impl GitTools {
     async fn blame_inner(&self, p: BlameParams) -> Result<String, String> {
         let repo = self.pick(p.repo.as_deref())?;
         let path = repo_paths(std::slice::from_ref(&p.path))?;
-        let mut cmd = GitCommand::read(repo.root()).args(["blame", "--date=short"]);
+        let mut cmd =
+            GitCommand::read(repo.root()).args(["blame", "--no-textconv", "--date=short"]);
         let range = match (p.start_line, p.end_line) {
             (None, None) => None,
             (Some(0), _) | (_, Some(0)) => return Err("line numbers start at 1".into()),

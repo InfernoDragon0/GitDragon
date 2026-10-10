@@ -27,24 +27,32 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, AppContext as _, ClickEvent, Context, ElementId, Entity, EventEmitter,
-    InteractiveElement as _, IntoElement, ParentElement as _, Render, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window, div, prelude::FluentBuilder as _, px, uniform_list,
+    InteractiveElement as _, IntoElement, ParentElement as _, Render, ScrollStrategy,
+    SharedString, StatefulInteractiveElement as _, Styled as _, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window, div, prelude::FluentBuilder as _, px,
+    uniform_list,
 };
+use gpui_kit::{FocusHandle, KeyDownEvent, MouseButton, NavigationDirection, ScrollHandle};
 use ui::{Palette, zoomed};
 
 use crate::hosted::{HostedRepo, Resolution, Session};
 use crate::hosts::logic::{ListError, now_secs, relative};
+use crate::hosts::page::{self, WidthProbe};
 use crate::hosts::{Link, dot, empty_panel, error_banner, label_color, label_pill, pill, resolve};
 use crate::repo_tab::RepoTab;
 use logic::{BoardModel, Filters, PickEntry, Section};
 
 const TICK: Duration = Duration::from_secs(15);
 const COLUMN_WIDTH: f32 = 264.;
-const DETAIL_WIDTH: f32 = 340.;
+/// Widest the description column reads well; the metadata column sits beside it.
+const PROSE_WIDTH: f32 = 960.;
+const META_WIDTH: f32 = 300.;
+/// Below this window width the metadata stacks above the description.
+const WIDE_VIEW: f32 = 900.;
 const ROW_HEIGHT: f32 = 34.;
 const MAX_BODY: usize = 12_000;
 
@@ -119,6 +127,22 @@ pub struct BoardsView {
     me: Option<String>,
     me_task: Option<Task<()>>,
     selected: Option<String>,
+    /// The selected item fills the whole panel instead of the board / table.
+    detail_open: bool,
+    detail_scroll: ScrollHandle,
+    /// The compact list beside an open item: its scroll, the user's fold (kept for the
+    /// session), an unfold on a narrow panel, and the panel width probe.
+    side_scroll: UniformListScrollHandle,
+    side_folded: bool,
+    side_pinned: bool,
+    panel_probe: WidthProbe,
+    focus: FocusHandle,
+    /// Kept on the view so the board keeps its scroll positions while a detail is open.
+    board_scroll: ScrollHandle,
+    column_scrolls: Vec<ScrollHandle>,
+    /// Which scrollbars have a real scroll range (columns, then the board's horizontal one),
+    /// as of the last layout; empty content must not show a thumb.
+    bar_flags: Vec<bool>,
     detail_task: Option<Task<()>>,
     detail_loading: bool,
     acting: bool,
@@ -201,6 +225,16 @@ impl BoardsView {
             me: None,
             me_task: None,
             selected: None,
+            detail_open: false,
+            detail_scroll: ScrollHandle::new(),
+            side_scroll: UniformListScrollHandle::new(),
+            side_folded: false,
+            side_pinned: false,
+            panel_probe: WidthProbe::new(page::WIDE_PANEL),
+            focus: cx.focus_handle(),
+            board_scroll: ScrollHandle::new(),
+            column_scrolls: Vec::new(),
+            bar_flags: Vec::new(),
             detail_task: None,
             detail_loading: false,
             acting: false,
@@ -247,6 +281,7 @@ impl BoardsView {
         self.board_task = None;
         self.model.reset();
         self.selected = None;
+        self.detail_open = false;
         self.notice = None;
         self.me = None;
         self.me_task = None;
@@ -441,6 +476,7 @@ impl BoardsView {
         if self.shown_id.as_deref() != Some(id.as_str()) {
             self.model.reset();
             self.selected = None;
+            self.detail_open = false;
             self.shown_id = Some(id);
         }
         self.load_board(None, false, cx);
@@ -458,6 +494,7 @@ impl BoardsView {
         self.shown_id = Some(entry.board.id.clone());
         self.model.reset();
         self.selected = None;
+        self.detail_open = false;
         self.notice = None;
         self.filters = Filters {
             text: self.filters.text.clone(),
@@ -560,9 +597,39 @@ impl BoardsView {
         self.model.items.iter().find(|i| &i.id == id).cloned()
     }
 
-    fn select(&mut self, id: String, cx: &mut Context<Self>) {
+    /// The ids the side list shows: the table's order in table mode, else every column's
+    /// items in column order.
+    fn detail_order(&self) -> Vec<String> {
+        let visible = self.visible();
+        if self.mode == Mode::Table {
+            return visible.iter().map(|i| i.id.clone()).collect();
+        }
+        logic::group(&self.model.columns, &visible)
+            .into_iter()
+            .flatten()
+            .map(|i| i.id.clone())
+            .collect()
+    }
+
+    /// Back to the board / table; the selection and every scroll position stay.
+    fn close_detail(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.detail_open {
+            self.detail_open = false;
+            self.notice = None;
+            window.focus(&self.focus, cx);
+            cx.notify();
+        }
+    }
+
+    fn select(&mut self, id: String, window: &mut Window, cx: &mut Context<Self>) {
         self.selected = Some(id.clone());
+        self.detail_open = true;
+        self.detail_scroll = ScrollHandle::new();
         self.notice = None;
+        if let Some(ix) = self.detail_order().iter().position(|i| *i == id) {
+            self.side_scroll.scroll_to_item(ix, ScrollStrategy::Nearest);
+        }
+        window.focus(&self.focus, cx);
         let Some((board, source)) = self.board_source() else {
             return;
         };
@@ -634,9 +701,9 @@ impl BoardsView {
         cx.notify();
     }
 
-    fn open_url(url: Option<&str>, cx: &mut Context<Self>) {
+    fn open_url(url: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(url) = url.filter(|u| !u.is_empty()) {
-            cx.open_url(url);
+            crate::links::open(url, Some(window), cx);
         }
     }
 
@@ -656,14 +723,14 @@ impl BoardsView {
             }
     }
 
-    fn open_pr(&mut self, item: &BoardItem, cx: &mut Context<Self>) {
+    fn open_pr(&mut self, item: &BoardItem, window: &mut Window, cx: &mut Context<Self>) {
         let Some(pr) = item.pull_requests.first() else {
             return;
         };
         if self.own_item(item) && item.repo.is_some() {
             cx.emit(BoardsEvent::OpenPullRequest(pr.number));
         } else {
-            Self::open_url(pr.web_url.as_deref(), cx);
+            Self::open_url(pr.web_url.as_deref(), window, cx);
         }
     }
 
@@ -759,7 +826,9 @@ impl Render for BoardsView {
         let palette = Palette::of(cx);
         match &self.link {
             Link::Resolving => centered("boards-connecting", "Connecting\u{2026}", &palette),
-            Link::Empty(empty) => empty_panel(empty, "Boards", "boards", &palette, "boards-empty"),
+            Link::Empty(empty) => {
+                empty_panel(empty, "Boards", "boards", &palette, "boards-empty", cx)
+            }
             Link::Ready(_) => self.render_ready(&palette, window, cx),
         }
     }
@@ -820,8 +889,44 @@ impl BoardsView {
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let toolbar = self.render_toolbar(palette, cx);
-        let filter_bar = self.render_filters(palette, cx);
+        // An open item's page is its own heading, so the tab header steps aside for it.
+        let header = (!self.detail_open).then(|| {
+            crate::page_header::page_header(
+                "Boards",
+                "Plan work across your project boards.",
+                None,
+                cx,
+            )
+        });
+        let filter_bar = (!self.detail_open).then(|| self.render_filters(palette, cx));
+        self.column_scrolls
+            .resize_with(self.model.columns.len(), ScrollHandle::new);
         let weak = cx.entity().downgrade();
+        self.bar_flags = self.scroll_flags();
+        // Scroll ranges only exist after layout, so re-check next frame and re-render only
+        // when a scrollbar should flip (settles in one pass, no loop).
+        let seen = self.bar_flags.clone();
+        let handles: Vec<ScrollHandle> = self
+            .column_scrolls
+            .iter()
+            .cloned()
+            .chain([self.board_scroll.clone()])
+            .collect();
+        let recheck = weak.clone();
+        window.on_next_frame(move |_, cx| {
+            let last = handles.len() - 1;
+            let now: Vec<bool> = handles
+                .iter()
+                .enumerate()
+                .map(|(i, h)| {
+                    let o = h.max_offset();
+                    if i == last { o.x > px(1.) } else { o.y > px(1.) }
+                })
+                .collect();
+            if now != seen {
+                _ = recheck.update(cx, |_, cx| cx.notify());
+            }
+        });
         let banner = self
             .model
             .error
@@ -832,19 +937,19 @@ impl BoardsView {
                     _ = weak.update(cx, |view, cx| view.refresh(true, cx));
                 })
             });
-        let notice =
-            self.notice
-                .clone()
-                .filter(|_| self.selected.is_none())
-                .map(|(error, text)| {
-                    div()
-                        .flex_none()
-                        .px_3()
-                        .py_1()
-                        .text_xs()
-                        .text_color(if error { palette.error } else { palette.ok })
-                        .child(text)
-                });
+        let notice = self
+            .notice
+            .clone()
+            .filter(|_| !self.detail_open)
+            .map(|(error, text)| {
+                div()
+                    .flex_none()
+                    .px_3()
+                    .py_1()
+                    .text_xs()
+                    .text_color(if error { palette.error } else { palette.ok })
+                    .child(SharedString::from(ui::sanitize_display(&text).into_owned()))
+            });
         let body: AnyElement = if self.entries.is_empty() {
             if self.boards_loading {
                 centered("boards-loading", "Loading boards\u{2026}", palette)
@@ -871,27 +976,58 @@ impl BoardsView {
                 palette,
             )
         } else {
-            let main = match self.mode {
-                Mode::Table => self.render_table(palette, cx),
-                Mode::Board | Mode::Mine => self.render_board(palette, cx),
-            };
             let detail = self
                 .selected_item()
-                .map(|item| self.render_detail(item, palette, window, cx));
-            h_flex()
-                .flex_1()
-                .min_h_0()
-                .size_full()
-                .child(div().flex_1().min_w_0().h_full().child(main))
-                .children(detail)
-                .into_any_element()
+                .filter(|_| self.detail_open)
+                .map(|item| self.render_open(item, palette, window, cx));
+            match detail {
+                Some(detail) => detail,
+                None => match self.mode {
+                    Mode::Table => self.render_table(palette, cx),
+                    Mode::Board | Mode::Mine => self.render_board(palette, cx),
+                },
+            }
         };
         v_flex()
             .id("boards-view")
+            .key_context("Boards")
+            .track_focus(&self.focus)
+            .on_key_down(cx.listener(|this, event: &KeyDownEvent, window, cx| {
+                match event.keystroke.key.as_str() {
+                    "escape" if this.detail_open => {
+                        this.close_detail(window, cx);
+                        cx.stop_propagation();
+                    }
+                    "up" | "down" if this.detail_open && event.keystroke.modifiers.alt => {
+                        let order = this.detail_order();
+                        let at = this
+                            .selected
+                            .as_ref()
+                            .and_then(|s| order.iter().position(|i| i == s));
+                        let down = event.keystroke.key == "down";
+                        if let Some(to) = crate::hosts::logic::step(at, order.len(), down) {
+                            this.select(order[to].clone(), window, cx);
+                        }
+                        cx.stop_propagation();
+                    }
+                    "enter" if !this.detail_open && this.focus.is_focused(window) => {
+                        if let Some(id) = this.selected.clone() {
+                            this.select(id, window, cx);
+                            cx.stop_propagation();
+                        }
+                    }
+                    _ => {}
+                }
+            }))
+            .on_mouse_up(
+                MouseButton::Navigate(NavigationDirection::Back),
+                cx.listener(|this, _, window, cx| this.close_detail(window, cx)),
+            )
             .size_full()
             .bg(palette.panel)
+            .children(header)
             .child(toolbar)
-            .child(filter_bar)
+            .children(filter_bar)
             .children(banner)
             .children(notice)
             .child(div().flex_1().min_h_0().child(body))
@@ -962,22 +1098,25 @@ impl BoardsView {
             .small()
             .outline()
             .icon(IconName::SquareKanban)
-            .label(SharedString::from(label))
+            .label(SharedString::from(ui::sanitize_line(&label).into_owned()))
             .disabled(self.entries.is_empty())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.max_h(px(420.)).scrollable(true);
                 for (heading, ix, text, checked) in &rows {
                     if let Some(heading) = heading {
-                        menu = menu.label(SharedString::from(heading.clone()));
+                        menu =
+                            menu.label(SharedString::from(ui::sanitize_line(heading).into_owned()));
                         continue;
                     }
                     let (this, ix) = (this.clone(), *ix);
                     menu = menu.item(
-                        PopupMenuItem::new(SharedString::from(text.clone()))
-                            .checked(*checked)
-                            .on_click(move |_, _, cx| {
-                                _ = this.update(cx, |view, cx| view.pick(ix, cx));
-                            }),
+                        PopupMenuItem::new(SharedString::from(
+                            ui::sanitize_line(text).into_owned(),
+                        ))
+                        .checked(*checked)
+                        .on_click(move |_, _, cx| {
+                            _ = this.update(cx, |view, cx| view.pick(ix, cx));
+                        }),
                     );
                 }
                 menu
@@ -1032,13 +1171,6 @@ impl BoardsView {
             .gap_1()
             .border_b_1()
             .border_color(palette.border)
-            .child(
-                div()
-                    .px_1()
-                    .text_sm()
-                    .text_color(palette.emph)
-                    .child("Boards"),
-            )
             .child(picker)
             .child(mode_button("board-mode-board", "Board".into(), Mode::Board))
             .child(mode_button("board-mode-table", "Table".into(), Mode::Table))
@@ -1067,7 +1199,9 @@ impl BoardsView {
                         .ghost()
                         .icon(IconName::ExternalLink)
                         .tooltip(SharedString::from(format!("Open on {service}")))
-                        .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url)),
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            crate::links::open(&url, Some(window), cx)
+                        }),
                 )
             })
             .child(
@@ -1104,7 +1238,7 @@ impl BoardsView {
             } else {
                 ButtonVariant::Ghost
             })
-            .label(SharedString::from(label))
+            .label(SharedString::from(ui::sanitize_line(&label).into_owned()))
             .disabled(values.is_empty() && current.is_none())
             .dropdown_menu(move |menu, _, _| {
                 let mut menu = menu.max_h(px(360.)).scrollable(true);
@@ -1122,15 +1256,17 @@ impl BoardsView {
                 for value in &values {
                     let (this, picked) = (this.clone(), value.clone());
                     menu = menu.item(
-                        PopupMenuItem::new(SharedString::from(value.clone()))
-                            .checked(current.as_ref() == Some(value))
-                            .on_click(move |_, _, cx| {
-                                let picked = picked.clone();
-                                _ = this.update(cx, |view, cx| {
-                                    set(&mut view.filters, Some(picked));
-                                    cx.notify();
-                                });
-                            }),
+                        PopupMenuItem::new(SharedString::from(
+                            ui::sanitize_line(value).into_owned(),
+                        ))
+                        .checked(current.as_ref() == Some(value))
+                        .on_click(move |_, _, cx| {
+                            let picked = picked.clone();
+                            _ = this.update(cx, |view, cx| {
+                                set(&mut view.filters, Some(picked));
+                                cx.notify();
+                            });
+                        }),
                     );
                 }
                 menu
@@ -1226,6 +1362,19 @@ impl BoardsView {
             .into_any_element()
     }
 
+    /// Whether each column (and, last, the board) really overflows. Judged from the laid-out
+    /// cards rather than `max_offset`, which reports a small range for empty or fitting columns
+    /// and kept their thumbs on screen.
+    fn scroll_flags(&self) -> Vec<bool> {
+        let mut flags: Vec<bool> = self
+            .column_scrolls
+            .iter()
+            .map(overflows_y)
+            .collect();
+        flags.push(overflows_x(&self.board_scroll));
+        flags
+    }
+
     fn render_board(&self, palette: &Palette, cx: &mut Context<Self>) -> AnyElement {
         if self.mode == Mode::Mine && self.me.is_none() {
             return centered(
@@ -1244,14 +1393,27 @@ impl BoardsView {
             .enumerate()
             .map(|(ix, (column, items))| self.render_column(ix, column, items, palette, cx))
             .collect();
-        h_flex()
-            .id("board-columns")
+        // The scrollbar overlays this wrapper (the real viewport), not the scrolled row, and
+        // shows only when the columns overflow; the row's bottom padding keeps it off the cards.
+        div()
+            .relative()
             .size_full()
-            .items_start()
-            .gap_2()
-            .p_2()
-            .overflow_x_scroll()
-            .children(columns)
+            .child(
+                h_flex()
+                    .id("board-columns")
+                    .size_full()
+                    .items_start()
+                    .gap_2()
+                    .px_2()
+                    .pt_2()
+                    .pb_4()
+                    .overflow_x_scroll()
+                    .track_scroll(&self.board_scroll)
+                    .children(columns),
+            )
+            .when(self.bar_flags.last().copied().unwrap_or(false), |d| {
+                d.horizontal_scrollbar(&self.board_scroll)
+            })
             .into_any_element()
     }
 
@@ -1273,6 +1435,7 @@ impl BoardsView {
             .enumerate()
             .map(|(row, item)| self.render_card(row, item, palette, cx))
             .collect();
+        let scroll = self.column_scrolls.get(ix).cloned().unwrap_or_default();
         v_flex()
             .id(ElementId::NamedInteger("board-column".into(), ix as u64))
             .flex_none()
@@ -1299,7 +1462,9 @@ impl BoardsView {
                             .truncate()
                             .text_sm()
                             .text_color(palette.emph)
-                            .child(SharedString::from(column.name.clone())),
+                            .child(SharedString::from(
+                                ui::sanitize_line(&column.name).into_owned(),
+                            )),
                     )
                     .child(
                         div()
@@ -1317,18 +1482,31 @@ impl BoardsView {
                     }),
             )
             .child(
-                v_flex()
-                    .id(ElementId::NamedInteger(
-                        "board-column-cards".into(),
-                        ix as u64,
-                    ))
+                // The scrollbar overlays this wrapper (the real viewport) and shows only when
+                // the cards overflow; the right gutter keeps the thumb off the cards.
+                div()
+                    .relative()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .px_1p5()
-                    .pb_2()
-                    .gap_1p5()
-                    .children(cards),
+                    .child(
+                        v_flex()
+                            .id(ElementId::NamedInteger(
+                                "board-column-cards".into(),
+                                ix as u64,
+                            ))
+                            .size_full()
+                            // Own handle per column: the offset survives the board being swapped out.
+                            .overflow_y_scroll()
+                            .track_scroll(&scroll)
+                            .pl_1p5()
+                            .pr_3()
+                            .pb_2()
+                            .gap_1p5()
+                            .children(cards),
+                    )
+                    .when(self.bar_flags.get(ix).copied().unwrap_or(false), |d| {
+                        d.vertical_scrollbar(&scroll)
+                    }),
             )
             .into_any_element()
     }
@@ -1345,7 +1523,7 @@ impl BoardsView {
         let id = item.id.clone();
         let drag = DragCard {
             id: item.id.clone(),
-            title: SharedString::from(item.title.clone()),
+            title: SharedString::from(ui::sanitize_line(&item.title).into_owned()),
         };
         let number = match (item.kind, item.number) {
             (ItemKind::Draft, _) => "draft".to_string(),
@@ -1366,8 +1544,14 @@ impl BoardsView {
             });
         v_flex()
             .id(ElementId::NamedInteger("board-card".into(), row as u64))
-            .p_2()
-            .gap_1()
+            .w_full()
+            .min_w_0()
+            // A long column overflows (and scrolls) instead of squashing its cards.
+            .flex_shrink_0()
+            .overflow_hidden()
+            .px_3()
+            .py_2p5()
+            .gap_1p5()
             .rounded_md()
             .border_1()
             .border_color(if selected {
@@ -1380,9 +1564,13 @@ impl BoardsView {
             .when(done, |d| d.opacity(0.7))
             .hover(|s| s.bg(palette.hover))
             .on_drag(drag, |drag, _, _, cx| cx.new(|_| drag.clone()))
-            .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| this.select(id.clone(), cx)))
+            .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                this.select(id.clone(), window, cx)
+            }))
             .child(
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_1()
                     .items_start()
                     .child(
@@ -1394,14 +1582,20 @@ impl BoardsView {
                     )
                     .child(
                         div()
+                            .flex_1()
                             .min_w_0()
+                            .overflow_hidden()
                             .text_sm()
                             .text_color(palette.emph)
-                            .child(SharedString::from(item.title.clone())),
+                            .child(SharedString::from(
+                                ui::sanitize_line(&item.title).into_owned(),
+                            )),
                     ),
             )
             .child(
                 h_flex()
+                    .w_full()
+                    .min_w_0()
                     .gap_1()
                     .flex_wrap()
                     .children(
@@ -1413,9 +1607,12 @@ impl BoardsView {
                     .when_some(item.iteration.clone(), |d, it| {
                         d.child(
                             div()
+                                .min_w_0()
+                                .max_w_full()
+                                .truncate()
                                 .text_xs()
                                 .text_color(palette.muted)
-                                .child(SharedString::from(it)),
+                                .child(SharedString::from(ui::sanitize_line(&it).into_owned())),
                         )
                     })
                     .child(div().flex_1())
@@ -1440,7 +1637,7 @@ impl BoardsView {
                         .text_xs()
                         .text_color(palette.lanes[1])
                         .truncate()
-                        .child(SharedString::from(link)),
+                        .child(SharedString::from(ui::sanitize_line(&link).into_owned())),
                 )
             })
             .into_any_element()
@@ -1458,19 +1655,21 @@ impl BoardsView {
         let header = h_flex()
             .flex_none()
             .h(zoomed(ROW_HEIGHT, cx))
-            .px_3()
+            .w_full()
+            .pl_3()
+            .pr_6()
             .gap_2()
             .border_b_1()
             .border_color(palette.border)
             .text_xs()
             .text_color(palette.muted)
-            .child(div().w(px(56.)).child("#"))
-            .child(div().flex_1().child("Title"))
-            .child(div().w(px(120.)).child("Status"))
-            .child(div().w(px(120.)).child("Assignee"))
-            .child(div().w(px(110.)).child("Iteration"))
-            .child(div().w(px(90.)).child(self.vocab.pr_short))
-            .child(div().w(px(80.)).child("Updated"));
+            .child(div().flex_none().w(px(56.)).child("#"))
+            .child(div().flex_1().min_w_0().child("Title"))
+            .child(div().flex_none().w(px(120.)).child("Status"))
+            .child(div().flex_none().w(px(120.)).child("Assignee"))
+            .child(div().flex_none().w(px(110.)).child("Iteration"))
+            .child(div().flex_none().w(px(90.)).child(self.vocab.pr_short))
+            .child(div().flex_none().w(px(80.)).child("Updated"));
         if count == 0 {
             return v_flex()
                 .size_full()
@@ -1486,15 +1685,25 @@ impl BoardsView {
             .size_full()
             .child(header)
             .child(
-                uniform_list(
-                    "board-table",
-                    count,
-                    cx.processor(|this, range: Range<usize>, _, cx| {
-                        this.render_table_rows(range, cx)
-                    }),
-                )
-                .track_scroll(&self.table_scroll)
-                .flex_1(),
+                v_flex()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(
+                        uniform_list(
+                            "board-table",
+                            count,
+                            cx.processor(|this, range: Range<usize>, _, cx| {
+                                this.render_table_rows(range, cx)
+                            }),
+                        )
+                        .track_scroll(&self.table_scroll)
+                        // Keeps the overlay scrollbar off the rows' right-hand badges.
+                        .pr_3()
+                        .w_full()
+                        .flex_1(),
+                    )
+                    .vertical_scrollbar(&self.table_scroll),
             )
             .into_any_element()
     }
@@ -1531,6 +1740,7 @@ impl BoardsView {
                 Some(
                     h_flex()
                         .id(ElementId::NamedInteger("board-row".into(), ix as u64))
+                        .w_full()
                         .h(height)
                         .px_3()
                         .gap_2()
@@ -1540,11 +1750,12 @@ impl BoardsView {
                         .border_color(palette.border.opacity(0.5))
                         .when(selected, |d| d.bg(palette.accent_soft))
                         .when(!selected, |d| d.hover(|s| s.bg(palette.hover)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.select(id.clone(), cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.select(id.clone(), window, cx)
                         }))
                         .child(
                             div()
+                                .flex_none()
                                 .w(px(56.))
                                 .text_xs()
                                 .text_color(palette.muted)
@@ -1556,31 +1767,184 @@ impl BoardsView {
                                 .min_w_0()
                                 .truncate()
                                 .text_color(palette.emph)
-                                .child(SharedString::from(item.title.clone())),
+                                .child(SharedString::from(
+                                    ui::sanitize_line(&item.title).into_owned(),
+                                )),
                         )
-                        .child(div().w(px(120.)).truncate().child(SharedString::from(
-                            logic::column_name(&self.model.columns, item).to_string(),
-                        )))
+                        .child(
+                            div().flex_none().w(px(120.)).truncate().child(SharedString::from(
+                                ui::sanitize_line(logic::column_name(&self.model.columns, item))
+                                    .into_owned(),
+                            )),
+                        )
                         .child(
                             div()
+                                .flex_none()
                                 .w(px(120.))
                                 .truncate()
                                 .text_xs()
-                                .child(SharedString::from(assignee)),
+                                .child(SharedString::from(
+                                    ui::sanitize_line(&assignee).into_owned(),
+                                )),
                         )
                         .child(
                             div()
+                                .flex_none()
                                 .w(px(110.))
                                 .truncate()
                                 .text_xs()
                                 .child(SharedString::from(
-                                    item.iteration.clone().unwrap_or_default(),
+                                    ui::sanitize_line(
+                                        item.iteration.as_deref().unwrap_or_default(),
+                                    )
+                                    .into_owned(),
                                 )),
                         )
-                        .child(div().w(px(90.)).text_xs().child(SharedString::from(pr)))
-                        .child(div().w(px(80.)).text_xs().text_color(palette.muted).child(
+                        .child(div().flex_none().w(px(90.)).text_xs().child(SharedString::from(pr)))
+                        .child(div().flex_none().w(px(80.)).text_xs().text_color(palette.muted).child(
                             SharedString::from(crate::hosts::logic::ago(&item.updated_at, now)),
                         ))
+                        .into_any_element(),
+                )
+            })
+            .collect()
+    }
+
+    /// An open item: the compact list on the left (unless folded or the panel is narrow),
+    /// its page beside it.
+    fn render_open(
+        &mut self,
+        item: BoardItem,
+        palette: &Palette,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+    ) -> AnyElement {
+        let show_side = !self.side_folded && (self.panel_probe.wide() || self.side_pinned);
+        let side = show_side.then(|| {
+            let count = self.detail_order().len();
+            let list = v_flex()
+                .relative()
+                .w_full()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "board-side-rows",
+                        count,
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            this.render_side_rows(range, cx)
+                        }),
+                    )
+                    .track_scroll(&self.side_scroll)
+                    .pr_3()
+                    .w_full()
+                    .flex_1(),
+                )
+                .vertical_scrollbar(&self.side_scroll)
+                .into_any_element();
+            page::side_column(
+                "Items",
+                list,
+                palette,
+                cx,
+                cx.listener(|this, _: &ClickEvent, _, cx| {
+                    this.side_folded = true;
+                    this.side_pinned = false;
+                    cx.notify();
+                }),
+            )
+        });
+        let unfold = (!show_side).then(|| {
+            page::unfold_button(cx.listener(|this, _: &ClickEvent, _, cx| {
+                this.side_folded = false;
+                this.side_pinned = !this.panel_probe.wide();
+                cx.notify();
+            }))
+        });
+        let page = self.render_detail(item, unfold, palette, window, cx);
+        h_flex()
+            .relative()
+            .size_full()
+            .bg(palette.panel)
+            .child(self.panel_probe.element())
+            .children(side)
+            .child(div().flex_1().min_w_0().h_full().child(page))
+            .into_any_element()
+    }
+
+    fn render_side_rows(&mut self, range: Range<usize>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+        let palette = Palette::of(cx);
+        let order = self.detail_order();
+        let height = zoomed(page::SIDE_ROW_HEIGHT, cx);
+        range
+            .filter_map(|ix| {
+                let id = order.get(ix)?.clone();
+                let item = self.model.items.iter().find(|i| i.id == id)?;
+                let open = self.selected.as_deref() == Some(id.as_str());
+                let full = SharedString::from(ui::sanitize_line(&item.title).into_owned());
+                let tip = full.clone();
+                let status = SharedString::from(
+                    ui::sanitize_line(logic::column_name(&self.model.columns, item)).into_owned(),
+                );
+                let number = item.number.map(|n| format!("#{n}"));
+                let click_id = id.clone();
+                Some(
+                    h_flex()
+                        .id(ElementId::NamedInteger("board-side-row".into(), ix as u64))
+                        .h(height)
+                        .w_full()
+                        .px_2()
+                        .gap_2()
+                        .cursor_pointer()
+                        .border_l_2()
+                        .border_color(if open {
+                            palette.accent
+                        } else {
+                            palette.accent.opacity(0.)
+                        })
+                        .when(open, |d| d.bg(palette.accent_soft))
+                        .when(!open, |d| d.hover(|s| s.bg(palette.hover)))
+                        .child(
+                            v_flex()
+                                .flex_1()
+                                .min_w_0()
+                                .gap_0p5()
+                                .child(
+                                    h_flex()
+                                        .gap_1()
+                                        .min_w_0()
+                                        .text_xs()
+                                        .when_some(number, |d, n| {
+                                            d.child(
+                                                div()
+                                                    .flex_none()
+                                                    .text_color(palette.muted)
+                                                    .child(SharedString::from(n)),
+                                            )
+                                        })
+                                        .child(
+                                            div()
+                                                .flex_1()
+                                                .min_w_0()
+                                                .truncate()
+                                                .text_color(palette.emph)
+                                                .child(full),
+                                        ),
+                                )
+                                .child(
+                                    h_flex()
+                                        .min_w_0()
+                                        .overflow_hidden()
+                                        .child(pill(status, palette.accent, &palette)),
+                                ),
+                        )
+                        .tooltip(move |window, cx| {
+                            gpui_kit::component::tooltip::Tooltip::new(tip.clone())
+                                .build(window, cx)
+                        })
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.select(click_id.clone(), window, cx)
+                        }))
                         .into_any_element(),
                 )
             })
@@ -1590,8 +1954,9 @@ impl BoardsView {
     fn render_detail(
         &self,
         item: BoardItem,
+        unfold: Option<AnyElement>,
         palette: &Palette,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let open = item.state == IssueState::Open;
@@ -1615,7 +1980,7 @@ impl BoardsView {
         let status_menu = Button::new("board-detail-status")
             .xsmall()
             .outline()
-            .label(SharedString::from(status))
+            .label(SharedString::from(ui::sanitize_line(&status).into_owned()))
             .loading(self.acting)
             .disabled(self.acting || columns.is_empty())
             .dropdown_menu(move |menu, _, _| {
@@ -1623,12 +1988,14 @@ impl BoardsView {
                 for (id, name) in &columns {
                     let (this, item_id, id) = (this.clone(), item_id.clone(), id.clone());
                     menu = menu.item(
-                        PopupMenuItem::new(SharedString::from(name.clone()))
-                            .checked(id == current_column)
-                            .on_click(move |_, _, cx| {
-                                let (item_id, id) = (item_id.clone(), id.clone());
-                                _ = this.update(cx, |view, cx| view.move_item(item_id, id, cx));
-                            }),
+                        PopupMenuItem::new(SharedString::from(
+                            ui::sanitize_line(name).into_owned(),
+                        ))
+                        .checked(id == current_column)
+                        .on_click(move |_, _, cx| {
+                            let (item_id, id) = (item_id.clone(), id.clone());
+                            _ = this.update(cx, |view, cx| view.move_item(item_id, id, cx));
+                        }),
                     );
                 }
                 menu
@@ -1675,7 +2042,8 @@ impl BoardsView {
                         .child(value),
                 )
         };
-        let text = |s: String| SharedString::from(s).into_any_element();
+        let text =
+            |s: String| SharedString::from(ui::sanitize_line(&s).into_owned()).into_any_element();
         let body = item
             .body
             .as_deref()
@@ -1691,11 +2059,11 @@ impl BoardsView {
             .and_then(|ix| self.entries.get(ix))
             .and_then(|e| self.sources.get(e.source))
             .map_or(self.vocab.service, |s| s.session.host.vocab().service);
-        let close = cx.listener(|this, _: &ClickEvent, _, cx| {
-            this.selected = None;
-            this.notice = None;
-            cx.notify();
-        });
+        let back = cx.listener(|this, _: &ClickEvent, window, cx| this.close_detail(window, cx));
+        let wide = window.viewport_size().width >= px(WIDE_VIEW);
+        let updated = (!item.updated_at.is_empty())
+            .then(|| crate::hosts::logic::ago(&item.updated_at, now_secs()));
+        let repo = item.repo.clone();
         let actions = h_flex()
             .gap_1p5()
             .flex_wrap()
@@ -1718,8 +2086,8 @@ impl BoardsView {
                         .outline()
                         .icon(IconName::GitPullRequest)
                         .label(SharedString::from(format!("Open {}", self.vocab.pr_short)))
-                        .on_click(cx.listener(move |this, _: &ClickEvent, _, cx| {
-                            this.open_pr(&for_pr, cx)
+                        .on_click(cx.listener(move |this, _: &ClickEvent, window, cx| {
+                            this.open_pr(&for_pr, window, cx)
                         })),
                 )
             })
@@ -1734,157 +2102,207 @@ impl BoardsView {
                         })),
                 )
             });
-        v_flex()
-            .id("board-detail")
-            .flex_none()
-            .w(px(DETAIL_WIDTH))
-            .h_full()
-            .border_l_1()
+        let meta = v_flex()
+            .gap_2()
+            .when(!wide, |d| d.w_full())
+            .when(wide, |d| d.w(px(META_WIDTH)).flex_none())
+            .p_3()
+            .rounded_md()
+            .border_1()
             .border_color(palette.border)
             .bg(palette.panel2)
+            .child(kv("Status", status_menu.into_any_element()))
+            .when_some(item.author.as_ref(), |d, a| {
+                d.child(kv("Author", text(a.login.clone())))
+            })
+            .when_some(repo, |d, repo| d.child(kv("Repository", text(repo))))
+            .when_some(updated, |d, at| d.child(kv("Updated", text(at))))
+            .when_some(item.iteration.clone(), |d, it| {
+                d.child(kv("Iteration", text(it)))
+            })
+            .when(!item.branches.is_empty(), |d| {
+                d.child(kv("Branch", text(item.branches.join(", "))))
+            })
+            .when(!prs.is_empty(), |d| {
+                d.child(kv(self.vocab.pr_short, text(prs)))
+            })
+            .when(self.detail_loading, |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child("Loading links\u{2026}"),
+                )
+            })
+            .child(actions)
+            .children(self.notice.clone().map(|(error, text)| {
+                div()
+                    .text_xs()
+                    .text_color(if error { palette.error } else { palette.ok })
+                    .child(SharedString::from(ui::sanitize_display(&text).into_owned()))
+            }));
+        let format = if service == "Azure DevOps" {
+            ::hosts::BodyFormat::Html
+        } else {
+            ::hosts::BodyFormat::Markdown
+        };
+        let description = v_flex()
+            .flex_1()
+            .min_w_0()
+            .max_w(px(PROSE_WIDTH))
+            .gap_2()
             .child(
-                h_flex()
-                    .flex_none()
-                    .px_2()
-                    .pt_1()
-                    .gap_1()
-                    .child(pill(
-                        SharedString::from(kind),
-                        if open { palette.ok } else { palette.lanes[1] },
-                        palette,
-                    ))
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(palette.muted)
-                            .child(SharedString::from(number)),
-                    )
-                    .child(div().flex_1())
-                    .when_some(item_web, |d, url| {
-                        d.child(
-                            Button::new("board-detail-web")
-                                .xsmall()
-                                .ghost()
-                                .icon(IconName::ExternalLink)
-                                .tooltip(SharedString::from(format!("Open on {service}")))
-                                .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&url)),
-                        )
-                    })
-                    .child(
-                        Button::new("board-detail-close")
-                            .xsmall()
-                            .ghost()
-                            .icon(IconName::X)
-                            .tooltip("Close details")
-                            .on_click(close),
-                    ),
+                div()
+                    .text_xs()
+                    .text_color(palette.muted)
+                    .child("Description"),
+            )
+            .child(match &body {
+                Some(text) => crate::hosts::conversation::body_view(
+                    ElementId::Name(format!("board-desc-{}", item.id).into()),
+                    text,
+                    format,
+                ),
+                None => div()
+                    .text_sm()
+                    .text_color(palette.muted)
+                    .child("No description.")
+                    .into_any_element(),
+            });
+        let header = h_flex()
+            .flex_none()
+            .flex_wrap()
+            .items_center()
+            .px_3()
+            .py_2()
+            .gap_2()
+            .border_b_1()
+            .border_color(palette.border)
+            .children(unfold)
+            .child(
+                Button::new("board-detail-back")
+                    .small()
+                    .outline()
+                    .icon(IconName::ArrowLeft)
+                    .label("Back")
+                    .tooltip("Back to the board (Esc)")
+                    .on_click(back),
+            )
+            .child(pill(
+                SharedString::from(kind),
+                if open { palette.ok } else { palette.lanes[1] },
+                palette,
+            ))
+            .child(
+                div()
+                    .text_color(palette.muted)
+                    .child(SharedString::from(number)),
             )
             .child(
-                v_flex()
-                    .id("board-detail-scroll")
+                ui::typography::page_title(ui::sanitize_line(&item.title).into_owned(), cx)
+                    .min_w_0(),
+            )
+            .child(pill(
+                SharedString::from(ui::sanitize_line(&status).into_owned()),
+                palette.accent,
+                palette,
+            ))
+            .when(!assignees.is_empty(), |d| {
+                d.child(
+                    div()
+                        .text_xs()
+                        .text_color(palette.muted)
+                        .child(SharedString::from(format!(
+                            "assigned to {}",
+                            ui::sanitize_line(&assignees)
+                        ))),
+                )
+            })
+            .children(
+                item.labels
+                    .iter()
+                    .map(|l| label_pill(l, palette).into_any_element()),
+            )
+            .child(div().flex_1())
+            .when_some(item_web, |d, url| {
+                d.child(
+                    Button::new("board-detail-web")
+                        .small()
+                        .ghost()
+                        .icon(IconName::ExternalLink)
+                        .label(SharedString::from(format!("Open on {service}")))
+                        .on_click(move |_: &ClickEvent, window, cx| {
+                            crate::links::open(&url, Some(window), cx)
+                        }),
+                )
+            });
+        let layout = if wide {
+            h_flex()
+                .w_full()
+                .max_w(px(PROSE_WIDTH + META_WIDTH + 24.))
+                .gap_6()
+                .items_start()
+                .child(description)
+                .child(meta)
+        } else {
+            v_flex()
+                .w_full()
+                .max_w(px(PROSE_WIDTH))
+                .gap_4()
+                .child(meta)
+                .child(description)
+        };
+        v_flex()
+            .id("board-detail")
+            .size_full()
+            .bg(palette.panel)
+            .child(header)
+            .child(
+                div()
                     .flex_1()
                     .min_h_0()
-                    .overflow_y_scroll()
-                    .px_3()
-                    .pb_3()
-                    .gap_2()
                     .child(
                         div()
-                            .text_base()
-                            .text_color(palette.emph)
-                            .child(SharedString::from(item.title.clone())),
+                            .id("board-detail-scroll")
+                            .size_full()
+                            .overflow_y_scroll()
+                            .track_scroll(&self.detail_scroll)
+                            .child(
+                                div()
+                                    .w_full()
+                                    .flex()
+                                    .justify_center()
+                                    .p_4()
+                                    .child(layout),
+                            ),
                     )
-                    .when_some(item.author.as_ref(), |d, a| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(palette.muted)
-                                .child(SharedString::from(format!("opened by {}", a.login))),
-                        )
-                    })
-                    .child(kv("Status", status_menu.into_any_element()))
-                    .child(kv(
-                        "Assignees",
-                        text(if assignees.is_empty() {
-                            "nobody".into()
-                        } else {
-                            assignees
-                        }),
-                    ))
-                    .when_some(item.iteration.clone(), |d, it| {
-                        d.child(kv("Iteration", text(it)))
-                    })
-                    .when(!item.labels.is_empty(), |d| {
-                        d.child(kv(
-                            "Labels",
-                            h_flex()
-                                .gap_1()
-                                .flex_wrap()
-                                .children(
-                                    item.labels
-                                        .iter()
-                                        .map(|l| label_pill(l, palette).into_any_element()),
-                                )
-                                .into_any_element(),
-                        ))
-                    })
-                    .when(!item.branches.is_empty(), |d| {
-                        d.child(kv("Branch", text(item.branches.join(", "))))
-                    })
-                    .when(!prs.is_empty(), |d| {
-                        d.child(kv(self.vocab.pr_short, text(prs)))
-                    })
-                    .when(self.detail_loading, |d| {
-                        d.child(
-                            div()
-                                .text_xs()
-                                .text_color(palette.muted)
-                                .child("Loading links\u{2026}"),
-                        )
-                    })
-                    .child(actions)
-                    .children(self.notice.clone().map(|(error, text)| {
-                        div()
-                            .text_xs()
-                            .text_color(if error { palette.error } else { palette.ok })
-                            .child(text)
-                    }))
-                    .child(
-                        div()
-                            .pt_1()
-                            .text_xs()
-                            .text_color(palette.muted)
-                            .child("Description"),
-                    )
-                    .child(
-                        v_flex()
-                            .gap_1()
-                            .text_sm()
-                            .text_color(palette.fg)
-                            .children(match &body {
-                                Some(text) => text
-                                    .lines()
-                                    .map(|line| {
-                                        if line.trim().is_empty() {
-                                            div().h(px(6.)).into_any_element()
-                                        } else {
-                                            div()
-                                                .child(SharedString::from(
-                                                    line.trim_end().to_string(),
-                                                ))
-                                                .into_any_element()
-                                        }
-                                    })
-                                    .collect::<Vec<_>>(),
-                                None => vec![
-                                    div()
-                                        .text_color(palette.muted)
-                                        .child("No description.")
-                                        .into_any_element(),
-                                ],
-                            }),
-                    ),
+                    .vertical_scrollbar(&self.detail_scroll),
             )
             .into_any_element()
     }
+}
+
+/// The laid-out children of `handle` span more than its viewport's height (an empty list never
+/// does). Reads the last frame's layout, like every scroll handle query.
+fn overflows_y(handle: &ScrollHandle) -> bool {
+    let count = handle.children_count();
+    let (Some(first), Some(last)) = (
+        handle.bounds_for_item(0),
+        count.checked_sub(1).and_then(|ix| handle.bounds_for_item(ix)),
+    ) else {
+        return false;
+    };
+    last.bottom() - first.top() > handle.bounds().size.height - px(12.)
+}
+
+/// [`overflows_y`] across: the columns span wider than the board's viewport.
+fn overflows_x(handle: &ScrollHandle) -> bool {
+    let count = handle.children_count();
+    let (Some(first), Some(last)) = (
+        handle.bounds_for_item(0),
+        count.checked_sub(1).and_then(|ix| handle.bounds_for_item(ix)),
+    ) else {
+        return false;
+    };
+    last.right() - first.left() > handle.bounds().size.width - px(12.)
 }

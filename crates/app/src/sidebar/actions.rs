@@ -70,7 +70,7 @@ pub(super) fn menu(
         let view = view.clone();
         // Copy works while git is busy; everything else waits.
         let disabled = busy && !matches!(action, Action::Copy(_));
-        PopupMenuItem::new(label)
+        PopupMenuItem::new(ui::sanitize_line(&label).into_owned())
             .disabled(disabled)
             .on_click(move |_, window, cx| {
                 _ = view.update(cx, |view, cx| view.run(action.clone(), window, cx));

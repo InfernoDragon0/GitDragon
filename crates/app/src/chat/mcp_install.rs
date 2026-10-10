@@ -128,6 +128,9 @@ pub fn install(path: &Path, entry: &Value) -> Result<Option<PathBuf>, String> {
     tmp.push(".gitdragon-tmp");
     let tmp = PathBuf::from(tmp);
     std::fs::write(&tmp, merged).map_err(io)?;
+    if let Ok(meta) = std::fs::metadata(path) {
+        _ = std::fs::set_permissions(&tmp, meta.permissions());
+    }
     std::fs::rename(&tmp, path).map_err(|e| {
         _ = std::fs::remove_file(&tmp);
         io(e)

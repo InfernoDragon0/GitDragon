@@ -570,3 +570,43 @@ fn merge_request_head_ref() {
         Some("merge-requests/9/head")
     );
 }
+
+#[test]
+fn merge_request_diffs_count_their_lines() {
+    let (replay, gl) = setup(Duration::ZERO);
+    replay.push(Route::new(
+        "GET",
+        &format!("{PROJECT}/merge_requests/9/diffs?page=1&per_page=100"),
+        200,
+        json!([
+            {"old_path": "a.rs", "new_path": "a.rs", "diff": "@@ -1 +1,2 @@\n-a\n+b\n+c\n",
+             "new_file": false, "renamed_file": false, "deleted_file": false},
+            {"old_path": "x/old.rs", "new_path": "x/new.rs", "diff": "",
+             "new_file": false, "renamed_file": true, "deleted_file": false},
+            {"old_path": "gone.rs", "new_path": "gone.rs", "diff": "@@ -1 +0,0 @@\n-x\n",
+             "new_file": false, "renamed_file": false, "deleted_file": true}
+        ]),
+    ));
+    let files = block_on(gl.pr_files(&repo(), 9)).unwrap();
+    assert!(!files.truncated);
+    let [a, renamed, gone] = files.files.as_slice() else {
+        panic!("three files");
+    };
+    assert_eq!(
+        (a.status, a.additions, a.deletions),
+        (PrFileStatus::Modified, 2, 1)
+    );
+    assert!(a.patch.as_deref().is_some_and(|p| p.starts_with("@@ ")));
+    assert_eq!(renamed.status, PrFileStatus::Renamed);
+    assert_eq!(renamed.old_path.as_deref(), Some("x/old.rs"));
+    assert_eq!(renamed.patch, None);
+    assert_eq!(
+        (gone.status, gone.path.as_str()),
+        (PrFileStatus::Removed, "gone.rs")
+    );
+    assert_eq!(
+        gl.pull_changes_ref(9)
+            .map(|r| (r.reference, r.merge_preview)),
+        Some(("merge-requests/9/head".to_string(), false))
+    );
+}

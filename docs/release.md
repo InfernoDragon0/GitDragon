@@ -15,7 +15,7 @@ builds are **unsigned**. Signing hooks exist but are disabled; this page says wh
 ## Local Windows build
 
 ```powershell
-cargo build --release --locked -p gitdragon
+cargo build --release --locked -p gitdragon -p mcp
 powershell -File packaging/windows/build.ps1        # writes dist/: portable zip, symbols zip, SHA256SUMS-windows.txt
 ```
 

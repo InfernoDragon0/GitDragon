@@ -84,6 +84,11 @@ pub const ROWS: &[Row] = &[
     row(Section::Appearance, "Theme", "aurora onyx skin colour"),
     row(Section::Appearance, "Mode", "dark light night"),
     row(Section::Appearance, "Zoom", "scale size bigger smaller"),
+    row(
+        Section::Appearance,
+        "Window size",
+        "resolution width height resize maximize 1080p remember",
+    ),
     row(Section::Git, "Git program", "path version detected binary"),
     row(
         Section::Git,

@@ -390,14 +390,15 @@ impl CliRepo {
 
     /// The worktree file (with its markers).
     pub async fn read_worktree_file(&self, path: &[u8]) -> Result<Vec<u8>> {
-        crate::ops::validate_repo_path(path)?;
-        Ok(std::fs::read(self.root().join(path.to_path_lossy()))?)
+        Ok(std::fs::read(crate::ops::worktree_file(
+            self.root(),
+            path,
+        )?)?)
     }
 
     /// Writes the resolved content and stages it.
     pub async fn resolve_with(&self, path: &[u8], content: &[u8]) -> Result<()> {
-        crate::ops::validate_repo_path(path)?;
-        std::fs::write(self.root().join(path.to_path_lossy()), content)?;
+        std::fs::write(crate::ops::worktree_file(self.root(), path)?, content)?;
         self.mark_resolved(&[BString::from(path)]).await
     }
 

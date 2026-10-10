@@ -34,6 +34,15 @@ pub trait GitHost: Send + Sync {
         None
     }
 
+    /// The ref to fetch for pull request `number`'s changes: its head where the host has
+    /// such refs ([`Self::pull_head_ref`]), else a merge preview.
+    fn pull_changes_ref(&self, number: u64) -> Option<PullRef> {
+        self.pull_head_ref(number).map(|reference| PullRef {
+            reference,
+            merge_preview: false,
+        })
+    }
+
     /// Last known API quota.
     fn rate_limit(&self) -> RateLimit {
         RateLimit::default()
@@ -96,6 +105,44 @@ pub trait GitHost: Send + Sync {
         _open: bool,
     ) -> HostResult<Issue> {
         Err(HostError::Unsupported(Feature::CloseIssue))
+    }
+
+    /// One page (1-based) of an issue's or pull request's conversation, oldest first:
+    /// comments and activity events. Inline review comments are not in it (see
+    /// [`Self::pr_review_comments`]).
+    async fn timeline(
+        &self,
+        _repo: &RepoId,
+        _thread: Thread,
+        _page: u32,
+    ) -> HostResult<Page<TimelineItem>> {
+        Err(HostError::Unsupported(Feature::Timeline))
+    }
+
+    /// One page of pull request `number`'s reviews, oldest first.
+    async fn pr_reviews(
+        &self,
+        _repo: &RepoId,
+        _number: u64,
+        _page: u32,
+    ) -> HostResult<Page<Review>> {
+        Err(HostError::Unsupported(Feature::Reviews))
+    }
+
+    /// One page of the comments on lines of pull request `number`'s diff, oldest first.
+    async fn pr_review_comments(
+        &self,
+        _repo: &RepoId,
+        _number: u64,
+        _page: u32,
+    ) -> HostResult<Page<ReviewComment>> {
+        Err(HostError::Unsupported(Feature::ReviewComments))
+    }
+
+    /// Pull request `number`'s changed files with their patches, for when its head can't be
+    /// fetched. May be truncated (see [`PrFiles::truncated`]).
+    async fn pr_files(&self, _repo: &RepoId, _number: u64) -> HostResult<PrFiles> {
+        Err(HostError::Unsupported(Feature::PrFiles))
     }
 
     /// Combined CI state of a commit or branch.

@@ -6,6 +6,7 @@ use std::path::PathBuf;
 
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::slider::{SliderEvent, SliderState};
 use gpui_kit::component::{Sizable as _, h_flex, v_flex};
 use gpui_kit::{
@@ -93,6 +94,8 @@ impl SettingsView {
                 cx.notify();
             }),
             cx.observe_global::<Appearance>(|_, cx| cx.notify()),
+            // The window-size presets mark the one that matches.
+            cx.observe_window_bounds(window, |_, _, cx| cx.notify()),
             cx.subscribe(&find, |_, _, event: &InputEvent, cx| {
                 if matches!(event, InputEvent::Change) {
                     cx.notify();
@@ -321,7 +324,7 @@ impl Render for SettingsView {
             .iter()
             .map(|section| {
                 let card = match section {
-                    Section::Appearance => self.appearance_card(&filter, &palette, cx),
+                    Section::Appearance => self.appearance_card(&filter, &palette, window, cx),
                     Section::Accounts => self.accounts.clone().into_any_element(),
                     Section::Git => self.git_card(&filter, &palette, cx),
                     Section::Editor => self.editor_card(&filter, &palette, cx),
@@ -329,7 +332,7 @@ impl Render for SettingsView {
                     Section::PullPush => self.pull_card(&filter, &palette, cx),
                     Section::Refresh => self.refresh_card(&filter, &palette, cx),
                     Section::Ai => self.ai.clone().into_any_element(),
-                    Section::Shortcuts => self.shortcuts_card(&filter, &palette, window),
+                    Section::Shortcuts => self.shortcuts_card(&filter, &palette, window, cx),
                     Section::Privacy => self.privacy_card(&filter, &palette, cx),
                 };
                 div()
@@ -359,36 +362,17 @@ impl Render for SettingsView {
             })
         };
 
-        let header = v_flex()
-            .flex_none()
-            .px_6()
-            .pt_5()
-            .pb_3()
-            .gap_3()
-            .border_b_1()
-            .border_color(palette.border)
-            .child(
-                h_flex()
-                    .gap_4()
-                    .items_center()
-                    .child(
-                        v_flex()
-                            .flex_1()
-                            .gap_1()
-                            .child(div().text_xl().text_color(palette.emph).child("Settings"))
-                            .child(
-                                div()
-                                    .text_sm()
-                                    .text_color(palette.muted)
-                                    .child("Changes save as you go."),
-                            ),
-                    )
-                    .child(
-                        div()
-                            .w(px(280.))
-                            .child(Input::new(&self.find).cleanable(true)),
-                    ),
-            )
+        let header = crate::page_header::page_header(
+            "Settings",
+            "Changes save as you go.",
+            Some(
+                div()
+                    .w(px(280.))
+                    .child(Input::new(&self.find).cleanable(true))
+                    .into_any_element(),
+            ),
+            cx,
+        )
             .children((!wide && !visible.is_empty()).then(|| {
                 h_flex()
                     .flex_wrap()
@@ -446,19 +430,25 @@ impl Render for SettingsView {
             .child(
                 h_flex().flex_1().min_h_0().w_full().children(nav).child(
                     div()
-                        .id("settings-scroll")
-                        .flex()
-                        .flex_col()
+                        .relative()
                         .flex_1()
                         .min_w_0()
                         .h_full()
-                        .p_6()
-                        .gap_4()
-                        .overflow_y_scroll()
-                        .track_scroll(&self.scroll)
-                        .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
-                        .children(cards)
-                        .children(nothing_found),
+                        .child(
+                            div()
+                                .id("settings-scroll")
+                                .flex()
+                                .flex_col()
+                                .size_full()
+                                .p_6()
+                                .gap_4()
+                                .overflow_y_scroll()
+                                .track_scroll(&self.scroll)
+                                .on_scroll_wheel(cx.listener(|_, _, _, cx| cx.notify()))
+                                .children(cards)
+                                .children(nothing_found),
+                        )
+                        .vertical_scrollbar(&self.scroll),
                 ),
             )
     }

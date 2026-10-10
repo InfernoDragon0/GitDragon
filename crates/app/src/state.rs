@@ -9,6 +9,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 use serde::{Deserialize, Serialize};
 
 use crate::prefs::Prefs;
+use crate::window_size::SavedWindow;
 
 const FILE_NAME: &str = "state.json";
 const STATE_DIR_ENV: &str = "GITDRAGON_STATE_DIR";
@@ -51,6 +52,9 @@ pub struct SavedState {
     /// Settings page values (git, editor, diff, pull, refresh timers).
     #[serde(default)]
     pub prefs: Prefs,
+    /// Size, place and maximized state of the main window.
+    #[serde(default)]
+    pub window: Option<SavedWindow>,
 }
 
 impl SavedState {
@@ -85,12 +89,12 @@ impl SavedState {
 
     /// Writes a temp file then renames it, so a crash never leaves half a file.
     pub fn save_to(&self, path: &Path) -> std::io::Result<()> {
-        if let Some(dir) = path.parent() {
-            std::fs::create_dir_all(dir)?;
-        }
-        let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_vec_pretty(self)?)?;
-        std::fs::rename(&tmp, path)
+        let dir = path.parent().unwrap_or(Path::new("."));
+        create_private_dir(dir)?;
+        let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
+        std::io::Write::write_all(&mut tmp, &serde_json::to_vec_pretty(self)?)?;
+        tmp.persist(path).map_err(|e| e.error)?;
+        Ok(())
     }
 
     /// Moves (or adds) `path` to the top of the recent list.
@@ -142,6 +146,31 @@ fn state_path() -> Option<PathBuf> {
     })
     .ok()?;
     Some(strategy.config_dir().join(FILE_NAME))
+}
+
+/// Creates `dir` (and its parents) readable by the current user only on Unix.
+pub fn create_private_dir(dir: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt as _;
+        std::fs::DirBuilder::new()
+            .recursive(true)
+            .mode(0o700)
+            .create(dir)
+    }
+    #[cfg(not(unix))]
+    {
+        std::fs::create_dir_all(dir)
+    }
+}
+
+/// Writes `bytes` to `path`, readable by the current user only on Unix.
+pub fn write_private(path: &Path, bytes: impl AsRef<[u8]>) -> std::io::Result<()> {
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create(true).truncate(true);
+    #[cfg(unix)]
+    std::os::unix::fs::OpenOptionsExt::mode(&mut options, 0o600);
+    std::io::Write::write_all(&mut options.open(path)?, bytes.as_ref())
 }
 
 #[cfg(test)]

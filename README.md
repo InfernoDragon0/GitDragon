@@ -5,12 +5,20 @@ It drives your installed `git` instead of linking a Git library, so it behaves e
 
 > Status: pre-release (0.1.0). Unsigned builds only; expect rough edges.
 
-<!-- SCREENSHOTS: add after the first tagged build.
-![Commit graph](docs/screenshots/graph.png)
-![Changes and commit box](docs/screenshots/changes.png)
-![Conflict resolver](docs/screenshots/conflicts.png)
-![Settings and themes](docs/screenshots/themes.png)
--->
+![Commit graph with branches and commit details](docs/screenshots/graph.png)
+
+<table>
+  <tr>
+    <td><img src="docs/screenshots/changes.png" alt="Changes: diff with hunk staging and the commit box"></td>
+    <td><img src="docs/screenshots/issue.png" alt="Issue page with conversation and participants"></td>
+  </tr>
+  <tr>
+    <td align="center">Changes: hunk staging, diffs, commit</td>
+    <td align="center">Issues and pull requests in place</td>
+  </tr>
+</table>
+
+![Settings: themes, accounts and more](docs/screenshots/settings.png)
 
 ## Features
 

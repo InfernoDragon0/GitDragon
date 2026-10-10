@@ -172,6 +172,26 @@ impl CliRepo {
         self.run_write(cmd).await
     }
 
+    /// Auto-fetch of every remote: no submodules, and the repo's own config can't choose
+    /// programs to run (see [`GitCommand::background`]). One fetch per remote, since
+    /// `--upload-pack` (the first configured value wins over `-c`) isn't passed on by `--all`.
+    pub async fn fetch_background(&self, prune: bool) -> Result<()> {
+        let mut first_error = None;
+        for remote in self.remotes().await? {
+            let cmd = fetch_command(self.sync_cmd().background(), prune)
+                .args([
+                    "--no-recurse-submodules",
+                    "--upload-pack=git-upload-pack",
+                    "--end-of-options",
+                ])
+                .rev(&remote.name)?;
+            if let Err(e) = self.run_write(cmd).await {
+                first_error.get_or_insert(e);
+            }
+        }
+        first_error.map_or(Ok(()), Err)
+    }
+
     /// Pulls the current branch's upstream.
     pub async fn pull(&self, mode: PullMode) -> Result<()> {
         let cmd = pull_command(self.sync_cmd(), mode);

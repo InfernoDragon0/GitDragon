@@ -5,9 +5,9 @@
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::Input;
 use gpui_kit::component::slider::Slider;
-use gpui_kit::component::{Sizable as _, h_flex, v_flex};
+use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
+    AnyElement, App, ClickEvent, ClipboardItem, Context, InteractiveElement as _, IntoElement,
     ParentElement as _, PathPromptOptions, SharedString, Styled as _, Window, div, px,
 };
 use ui::theme;
@@ -16,6 +16,7 @@ use ui::{Mode, Palette, Skin};
 use crate::prefs::{self, CONTEXT_CHOICES, FETCH_CHOICES, PullPref, REFRESH_CHOICES};
 use crate::settings::{SettingsView, choice, row};
 use crate::settings_find::{Filter, Section};
+use crate::window_size::{PRESETS, Rect, apply_preset, preset_fits, preset_label};
 
 /// A card under construction: only the rows the filter keeps.
 pub(crate) struct Card<'a> {
@@ -56,7 +57,7 @@ impl<'a> Card<'a> {
         self
     }
 
-    pub(crate) fn finish(self) -> AnyElement {
+    pub(crate) fn finish(self, cx: &App) -> AnyElement {
         v_flex()
             .w_full()
             .p_4()
@@ -65,12 +66,7 @@ impl<'a> Card<'a> {
             .border_1()
             .border_color(self.palette.border)
             .bg(self.palette.panel)
-            .child(
-                div()
-                    .pb_2()
-                    .text_color(self.palette.emph)
-                    .child(self.section.title()),
-            )
+            .child(ui::typography::subtitle(self.section.title(), cx).pb_2())
             .children(self.rows)
             .into_any_element()
     }
@@ -102,10 +98,14 @@ impl SettingsView {
         &mut self,
         filter: &Filter,
         palette: &Palette,
+        window: &Window,
         cx: &mut Context<Self>,
     ) -> AnyElement {
         let appearance = theme::appearance(cx);
         let zoom = theme::zoom(cx);
+        let display: Option<Rect> = window.display(cx).map(|d| d.visible_bounds().into());
+        let now = window.viewport_size();
+        let maximized = window.is_maximized() || window.is_fullscreen();
         Card::new(Section::Appearance, filter, palette)
             .row(
                 "Theme",
@@ -163,7 +163,32 @@ impl SettingsView {
                             }),
                     ),
             )
-            .finish()
+            .row(
+                "Window size",
+                "Picking one un-maximizes the window and resizes it; the size is remembered for \
+                 the next launch.",
+                h_flex()
+                    .gap_1()
+                    .children(PRESETS.iter().enumerate().map(|(ix, preset)| {
+                        let preset = *preset;
+                        let current = !maximized
+                            && (f32::from(now.width) - preset.0).abs() < 1.
+                            && (f32::from(now.height) - preset.1).abs() < 1.;
+                        let button = Button::new(("window-size", ix))
+                            .small()
+                            .label(preset_label(preset))
+                            .disabled(!preset_fits(preset, display));
+                        let button = if current {
+                            button.primary()
+                        } else {
+                            button.outline()
+                        };
+                        button.on_click(move |_: &ClickEvent, window, _| {
+                            apply_preset(preset, window);
+                        })
+                    })),
+            )
+            .finish(cx)
     }
 
     pub(crate) fn git_card(
@@ -224,7 +249,7 @@ impl SettingsView {
                 ),
                 nothing(),
             )
-            .finish()
+            .finish(cx)
     }
 
     pub(crate) fn editor_card(
@@ -278,7 +303,7 @@ impl SettingsView {
                             })),
                     ),
             )
-            .finish()
+            .finish(cx)
     }
 
     /// File picker for the custom editor; the chosen path goes through the same validation as
@@ -345,7 +370,7 @@ impl SettingsView {
                     prefs::update(cx, |p| p.ignore_whitespace = on)
                 }),
             )
-            .finish()
+            .finish(cx)
     }
 
     pub(crate) fn pull_card(
@@ -387,7 +412,7 @@ impl SettingsView {
                  to the branch since you last fetched. It asks before it runs.",
                 nothing(),
             )
-            .finish()
+            .finish(cx)
     }
 
     pub(crate) fn refresh_card(
@@ -432,7 +457,7 @@ impl SettingsView {
                 ),
                 nothing(),
             )
-            .finish()
+            .finish(cx)
     }
 
     pub(crate) fn shortcuts_card(
@@ -440,6 +465,7 @@ impl SettingsView {
         filter: &Filter,
         palette: &Palette,
         window: &mut Window,
+        cx: &App,
     ) -> AnyElement {
         let mut card = Card::new(Section::Shortcuts, filter, palette);
         for (ix, (label, action)) in crate::actions::shortcut_actions().into_iter().enumerate() {
@@ -471,7 +497,7 @@ impl SettingsView {
                 .into_any_element();
             card = card.element(label, element);
         }
-        card.finish()
+        card.finish(cx)
     }
 
     pub(crate) fn privacy_card(
@@ -499,6 +525,6 @@ impl SettingsView {
                     }
                 }),
             )
-            .finish()
+            .finish(cx)
     }
 }

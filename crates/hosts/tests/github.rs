@@ -236,6 +236,62 @@ fn rate_limit_blocks_and_serves_stale() {
     assert_eq!(replay.seen().len(), calls, "no requests while blocked");
 }
 
+/// GitHub answers GraphQL without a token with `403` and a quota of 0. That is "sign in", not
+/// a wait, and it must not block the REST calls (pull requests, issues).
+#[test]
+fn graphql_without_a_quota_is_not_a_rate_limit() {
+    let (replay, gh) = setup(Duration::ZERO);
+    replay.first(
+        Route::new(
+            "POST",
+            &format!("{API}/graphql"),
+            403,
+            json!({"message": "API rate limit exceeded"}),
+        )
+        .header("x-ratelimit-limit", "0")
+        .header("x-ratelimit-remaining", "0")
+        .header("x-ratelimit-resource", "graphql")
+        .header("x-ratelimit-reset", "4102444800"),
+    );
+    let err = block_on(gh.boards(&repo())).unwrap_err();
+    assert!(matches!(err, HostError::Forbidden { .. }), "{err}");
+    assert!(err.to_string().contains("signed-in account"), "{err}");
+    assert!(gh.rate_limit().blocked_until.is_none());
+    assert_eq!(block_on(gh.whoami()).unwrap().login, "InfernoDragon0");
+}
+
+/// A spent GraphQL quota blocks GraphQL only; REST keeps its own.
+#[test]
+fn graphql_rate_limit_leaves_rest_alone() {
+    let (replay, gh) = setup(Duration::ZERO);
+    replay.first(
+        Route::new(
+            "POST",
+            &format!("{API}/graphql"),
+            403,
+            json!({"message": "API rate limit exceeded"}),
+        )
+        .header("x-ratelimit-limit", "5000")
+        .header("x-ratelimit-remaining", "0")
+        .header("x-ratelimit-resource", "graphql")
+        .header("x-ratelimit-reset", "4102444800"),
+    );
+    let err = block_on(gh.boards(&repo())).unwrap_err();
+    assert!(matches!(err, HostError::RateLimited { .. }), "{err}");
+    let calls = replay.seen().len();
+    // GraphQL stays blocked without asking again...
+    let err = block_on(gh.boards(&repo())).unwrap_err();
+    assert!(matches!(err, HostError::RateLimited { .. }), "{err}");
+    assert_eq!(
+        replay.seen().len(),
+        calls,
+        "no GraphQL request while blocked"
+    );
+    // ...while REST still works.
+    assert!(gh.rate_limit().blocked_until.is_none());
+    assert_eq!(block_on(gh.whoami()).unwrap().login, "InfernoDragon0");
+}
+
 #[test]
 fn secondary_rate_limit_uses_retry_after() {
     let (replay, gh) = setup(Duration::ZERO);
@@ -561,4 +617,70 @@ fn closing_and_reopening_an_issue_patches_its_state() {
 fn fork_pull_requests_are_fetched_through_the_pull_ref() {
     let (_, gh) = setup(Duration::ZERO);
     assert_eq!(gh.pull_head_ref(42).as_deref(), Some("pull/42/head"));
+}
+
+#[test]
+fn pull_request_files_page_through_with_patches() {
+    let (replay, gh) = setup(Duration::ZERO);
+    let base = format!("{API}/repos/InfernoDragon0/GitDragon/pulls/42/files");
+    replay.push(
+        Route::new(
+            "GET",
+            &format!("{base}?per_page=100&page=1"),
+            200,
+            json!([
+                {"filename": "src/a.rs", "status": "modified", "additions": 2, "deletions": 1,
+                 "patch": "@@ -1 +1,2 @@\n-a\n+b\n+c"},
+                {"filename": "img.png", "status": "added", "additions": 0, "deletions": 0}
+            ]),
+        )
+        .header(
+            "link",
+            &format!("<{base}?per_page=100&page=2>; rel=\"next\""),
+        ),
+    );
+    replay.push(Route::new(
+        "GET",
+        &format!("{base}?per_page=100&page=2"),
+        200,
+        json!([
+            {"filename": "new/b.rs", "previous_filename": "old/b.rs", "status": "renamed",
+             "additions": 0, "deletions": 0, "patch": ""},
+            {"filename": "gone.rs", "status": "removed", "additions": 0, "deletions": 3,
+             "patch": "@@ -1,3 +0,0 @@\n-x\n-y\n-z"}
+        ]),
+    ));
+    let files = block_on(gh.pr_files(&repo(), 42)).unwrap();
+    assert!(!files.truncated);
+    let got: Vec<(&str, PrFileStatus, u32, u32, bool)> = files
+        .files
+        .iter()
+        .map(|f| {
+            (
+                f.path.as_str(),
+                f.status,
+                f.additions,
+                f.deletions,
+                f.patch.is_some(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        got,
+        [
+            ("src/a.rs", PrFileStatus::Modified, 2, 1, true),
+            ("img.png", PrFileStatus::Added, 0, 0, false),
+            ("new/b.rs", PrFileStatus::Renamed, 0, 0, false),
+            ("gone.rs", PrFileStatus::Removed, 0, 3, true),
+        ]
+    );
+    assert_eq!(files.files[2].old_path.as_deref(), Some("old/b.rs"));
+    assert!(gh.supports(Feature::PrFiles));
+    assert_eq!(
+        gh.pull_changes_ref(42),
+        Some(PullRef {
+            reference: "pull/42/head".into(),
+            merge_preview: false
+        })
+    );
 }

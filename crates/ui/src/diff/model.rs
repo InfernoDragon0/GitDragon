@@ -173,14 +173,15 @@ impl DiffModel {
     }
 }
 
-/// Lossy UTF-8 with tabs expanded and a trailing `\r` dropped.
+/// Lossy UTF-8 with tabs expanded, a trailing `\r` dropped and control characters escaped.
 fn display_text(bytes: &[u8]) -> SharedString {
     let text = String::from_utf8_lossy(bytes);
     let text = text.strip_suffix('\r').unwrap_or(&text);
+    let text = crate::sanitize_line(text);
     if text.contains('\t') {
         text.replace('\t', TAB).into()
     } else {
-        SharedString::from(text.to_string())
+        SharedString::from(text.into_owned())
     }
 }
 
@@ -257,5 +258,9 @@ diff --git a/f b/f
     #[test]
     fn tabs_expand() {
         assert_eq!(display_text(b"\tx\r").as_ref(), "    x");
+        assert_eq!(
+            display_text("a\u{202e}b\u{1b}".as_bytes()).as_ref(),
+            "a<U+202E>b<U+001B>"
+        );
     }
 }

@@ -10,6 +10,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(mktemp -d)"
 
 install -Dm755 "$BIN" "$ROOT/usr/bin/gitdragon"
+# gitdragon-mcp lives next to the app binary; Settings > AI looks for it there.
+install -Dm755 "$(dirname "$BIN")/gitdragon-mcp" "$ROOT/usr/bin/gitdragon-mcp"
 install -Dm644 "$HERE/gitdragon.desktop" "$ROOT/usr/share/applications/gitdragon.desktop"
 # TODO(icon): install a 256x256 PNG to usr/share/icons/hicolor/256x256/apps/gitdragon.png once one exists.
 [ -f "$HERE/gitdragon.png" ] && install -Dm644 "$HERE/gitdragon.png" "$ROOT/usr/share/icons/hicolor/256x256/apps/gitdragon.png"

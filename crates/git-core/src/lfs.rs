@@ -278,12 +278,16 @@ impl CliRepo {
 
     /// Locks on the LFS server (network; asks for credentials like a push).
     pub async fn lfs_locks(&self) -> Result<Vec<Lock>> {
-        let cmd = GitCommand::write(self.root()).args(["lfs", "locks", "--verify", "--json"]);
+        let cmd = GitCommand::write(self.root())
+            .background()
+            .args(["lfs", "locks", "--verify", "--json"]);
         match self.runner().run(cmd).await {
             Ok(out) => parse_locks(&out),
             // Servers without lock verification: fall back to the plain list.
             Err(_) => {
-                let cmd = GitCommand::write(self.root()).args(["lfs", "locks", "--json"]);
+                let cmd = GitCommand::write(self.root())
+                    .background()
+                    .args(["lfs", "locks", "--json"]);
                 parse_locks(&self.runner().run(cmd).await?)
             }
         }

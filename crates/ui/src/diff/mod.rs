@@ -2,6 +2,7 @@
 //! one rendered line (gutter, sign, text with word-level emphasis). The panels own the virtual
 //! list and the hunk / line actions.
 
+pub mod copy;
 pub mod model;
 pub mod syntax;
 pub mod words;
@@ -184,11 +185,32 @@ pub fn filler(palette: &Palette, cx: &App) -> Div {
     div().h(zoomed(ROW_HEIGHT, cx)).w_full().bg(palette.panel2)
 }
 
+/// The row with the longest line (the longer side of a split pair), for a horizontally
+/// scrolling list to measure its width by (`UniformList::with_width_from_item`).
+pub fn widest_row(model: &DiffModel, layout: Layout) -> Option<usize> {
+    let len = |hunk: usize, line: Option<usize>| {
+        line.and_then(|l| model.lines.get(hunk)?.get(l))
+            .map_or(0, |v| v.text.chars().count())
+    };
+    model
+        .rows(layout)
+        .iter()
+        .enumerate()
+        .max_by_key(|(_, row)| match **row {
+            DiffRow::Hunk { .. } => 0,
+            DiffRow::Line { hunk, line } => len(hunk, Some(line)),
+            DiffRow::Pair { hunk, left, right } => len(hunk, left).max(len(hunk, right)),
+        })
+        .map(|(ix, _)| ix)
+}
+
 /// One row of a read-only diff (commit details): hunk header, unified line or split pair.
+/// `selected` marks a row of the copy selection.
 pub fn read_only_row(
     model: &DiffModel,
     layout: Layout,
     ix: usize,
+    selected: bool,
     palette: &Palette,
     cx: &App,
 ) -> Option<AnyElement> {
@@ -199,7 +221,11 @@ pub fn read_only_row(
                 .h(zoomed(ROW_HEIGHT, cx))
                 .w_full()
                 .px_2()
-                .bg(palette.panel2)
+                .bg(if selected {
+                    palette.accent_soft
+                } else {
+                    palette.panel2
+                })
                 .text_xs()
                 .text_color(palette.muted)
                 .child(div().min_w_0().truncate().child(SharedString::from(
@@ -214,7 +240,7 @@ pub fn read_only_row(
                 view,
                 l.kind,
                 &[l.old_lineno, l.new_lineno],
-                false,
+                selected,
                 palette,
                 cx,
             )
@@ -231,7 +257,8 @@ pub fn read_only_row(
                 match found {
                     Some((l, view)) => {
                         let number = if old { l.old_lineno } else { l.new_lineno };
-                        self::line(view, l.kind, &[number], false, palette, cx).into_any_element()
+                        self::line(view, l.kind, &[number], selected, palette, cx)
+                            .into_any_element()
                     }
                     None => filler(palette, cx).into_any_element(),
                 }

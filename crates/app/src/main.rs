@@ -12,13 +12,16 @@ mod chat;
 mod clone_dialog;
 mod conflicts;
 mod dialogs;
+mod diff_select;
 mod drag_scroll;
 mod empty;
 mod file_editor;
 mod graph;
 mod hosted;
 mod hosts;
+mod links;
 mod op_strip;
+mod page_header;
 mod palette;
 mod panels;
 mod prefs;
@@ -34,10 +37,11 @@ mod toast;
 mod toolbar;
 mod undo;
 mod welcome;
+mod window_size;
 mod workspace;
 
 use gpui_kit::component::TitleBar;
-use gpui_kit::{AppContext as _, Bounds, WindowBounds, WindowOptions, px, size};
+use gpui_kit::{AppContext as _, WindowOptions, px, size};
 use tracing_subscriber::EnvFilter;
 use ui::assets::AppAssets;
 use ui::{Appearance, theme};
@@ -110,12 +114,11 @@ fn main() {
         .detach();
 
         let options = WindowOptions {
-            window_bounds: Some(WindowBounds::Windowed(Bounds::centered(
-                None,
-                size(px(1280.), px(800.)),
-                cx,
-            ))),
-            window_min_size: Some(size(px(800.), px(500.))),
+            window_bounds: Some(window_size::initial_bounds(saved.window.as_ref(), cx)),
+            window_min_size: Some(size(
+                px(window_size::MIN_SIZE.0),
+                px(window_size::MIN_SIZE.1),
+            )),
             ..TitleBar::window_options()
         };
         gpui_kit::open_window(options, cx, |window, cx| {

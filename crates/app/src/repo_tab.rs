@@ -27,6 +27,31 @@ const AUTO_FETCH_TICK: std::time::Duration = std::time::Duration::from_secs(15);
 /// A background fetch that takes longer than this is abandoned (git is killed).
 const AUTO_FETCH_LIMIT: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// The remote operations the toolbar animates. Derived once, in [`RepoTab::run_op_with`], from
+/// the operation label (every Fetch / Pull / Push start uses a "Fetching" / "Pulling" /
+/// "Pushing" label), so the toolbar itself never string-matches.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OpKind {
+    Fetch,
+    Pull,
+    Push,
+    Other,
+}
+
+impl OpKind {
+    fn of(label: &str) -> Self {
+        if label.starts_with("Fetching") {
+            Self::Fetch
+        } else if label.starts_with("Pulling") {
+            Self::Pull
+        } else if label.starts_with("Pushing") {
+            Self::Push
+        } else {
+            Self::Other
+        }
+    }
+}
+
 pub struct RepoTab {
     pub path: PathBuf,
     pub name: SharedString,
@@ -53,6 +78,8 @@ pub struct RepoTab {
     pub op_error: Option<SharedString>,
     /// Label of the running user operation, e.g. `Pushing main`.
     pub op_label: Option<SharedString>,
+    /// Which remote operation `op_label` is, for the toolbar animations.
+    pub op_kind: OpKind,
     /// The running user operation; dropping it kills git.
     op_task: Option<Task<()>>,
     /// The Undo on offer for the last operation, for [`undo::WINDOW`].
@@ -104,6 +131,7 @@ impl RepoTab {
             loading: true,
             op_error: None,
             op_label: None,
+            op_kind: OpKind::Other,
             op_task: None,
             undo: None,
             undo_serial: 0,
@@ -189,7 +217,11 @@ impl RepoTab {
             let timer = executor.clone();
             let result = executor
                 .spawn(async move {
-                    let fetch = async { repo.fetch(None, prune).await.map_err(|e| e.to_string()) };
+                    let fetch = async {
+                        repo.fetch_background(prune)
+                            .await
+                            .map_err(|e| e.to_string())
+                    };
                     let limit = async {
                         timer.timer(AUTO_FETCH_LIMIT).await;
                         Err("timed out".to_string())
@@ -533,7 +565,9 @@ impl RepoTab {
         // Any new operation makes the last Undo stale (its safety checks would refuse anyway).
         self.undo = None;
         self.undo_task = None;
-        self.op_label = Some(label.into());
+        let label: SharedString = label.into();
+        self.op_kind = OpKind::of(&label);
+        self.op_label = Some(label);
         let job = cx.background_executor().spawn(op(repo));
         self.op_task = Some(cx.spawn(async move |this, cx| {
             let result = job.await;

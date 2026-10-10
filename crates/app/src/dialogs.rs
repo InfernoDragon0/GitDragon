@@ -21,7 +21,10 @@ pub fn confirm(
     danger: bool,
     on_ok: impl Fn(&mut Window, &mut App) + 'static,
 ) {
-    let (title, body, ok) = (title.into(), body.into(), ok.into());
+    let (title, body, ok): (SharedString, SharedString, SharedString) =
+        (title.into(), body.into(), ok.into());
+    let title = SharedString::from(ui::sanitize_line(&title).into_owned());
+    let body = SharedString::from(ui::sanitize_display(&body).into_owned());
     let on_ok = Rc::new(on_ok);
     window.open_alert_dialog(cx, move |alert, _, _| {
         let on_ok = on_ok.clone();

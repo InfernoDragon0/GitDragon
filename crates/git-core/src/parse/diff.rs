@@ -503,6 +503,135 @@ fn hunk_header(line: &[u8]) -> Option<(u32, u32, u32, u32, BString)> {
     Some((old_start, old_lines, new_start, new_lines, section))
 }
 
+/// One file's diff from bare hunks (`@@ ... @@` onwards, no `diff --git` header), as hosting
+/// APIs send them (GitHub's `patch`, GitLab's `diff`). `change` and the paths are taken as
+/// given; the header is rebuilt so the result copies as a patch. An empty `hunks` gives a
+/// file without hunks.
+pub fn from_hunks(
+    old_path: Option<&[u8]>,
+    new_path: Option<&[u8]>,
+    change: FileChange,
+    hunks: &[u8],
+) -> ParseResult<FileDiff> {
+    // Paths a header line can hold as-is; anything else gets a stand-in (the real paths are
+    // set below, the header only matters for copying).
+    let plain = |p: &[u8]| {
+        !p.is_empty()
+            && !p.iter().any(|&b| {
+                b.is_ascii_whitespace() || b.is_ascii_control() || b == b'"' || b == b'\\'
+            })
+    };
+    let shown_old = old_path.filter(|p| plain(p)).unwrap_or(b"file");
+    let shown_new = new_path.filter(|p| plain(p)).unwrap_or(shown_old);
+    let shown_old = if old_path.is_some() {
+        shown_old
+    } else {
+        shown_new
+    };
+    let mut text = Vec::with_capacity(hunks.len() + 128);
+    text.extend_from_slice(b"diff --git a/");
+    text.extend_from_slice(shown_old);
+    text.extend_from_slice(b" b/");
+    text.extend_from_slice(shown_new);
+    text.push(b'\n');
+    match change {
+        FileChange::Added => text.extend_from_slice(b"new file mode 100644\n"),
+        FileChange::Deleted => text.extend_from_slice(b"deleted file mode 100644\n"),
+        _ => {}
+    }
+    let side = |text: &mut Vec<u8>, prefix: &[u8], path: Option<&[u8]>| {
+        match path {
+            Some(path) => {
+                text.extend_from_slice(prefix);
+                text.extend_from_slice(path);
+            }
+            None => text.extend_from_slice(b"/dev/null"),
+        }
+        text.push(b'\n');
+    };
+    if !hunks.trim().is_empty() {
+        if !hunks.starts_with(b"@@ ") {
+            return Err(error(0, "hunks must start with `@@ `"));
+        }
+        let old = (change != FileChange::Added).then_some(shown_old);
+        let new = (change != FileChange::Deleted).then_some(shown_new);
+        side(&mut text, b"--- a/", old);
+        side(&mut text, b"+++ b/", new);
+        text.extend_from_slice(hunks);
+        if !hunks.ends_with(b"\n") {
+            text.push(b'\n');
+        }
+    }
+    let mut file = parse(&text)?
+        .into_iter()
+        .next()
+        .ok_or_else(|| error(0, "no file"))?;
+    file.old_path = match change {
+        FileChange::Added => None,
+        _ => old_path.or(new_path).map(BString::from),
+    };
+    file.new_path = match change {
+        FileChange::Deleted => None,
+        _ => new_path.or(old_path).map(BString::from),
+    };
+    file.change = change;
+    Ok(file)
+}
+
+#[cfg(test)]
+mod from_hunks_tests {
+    use super::*;
+
+    #[test]
+    fn bare_hunks_become_a_file() {
+        let hunks = b"@@ -1,2 +1,2 @@ fn main\n a\n-b\n+c\n\\ No newline at end of file";
+        let file = from_hunks(
+            Some(b"src/old name.rs"),
+            Some(b"src/new.rs"),
+            FileChange::Renamed { similarity: 90 },
+            hunks,
+        )
+        .unwrap();
+        assert_eq!(file.old_path, Some(BString::from("src/old name.rs")));
+        assert_eq!(file.new_path, Some(BString::from("src/new.rs")));
+        assert_eq!(file.change, FileChange::Renamed { similarity: 90 });
+        assert_eq!(file.hunks.len(), 1);
+        let kinds: Vec<LineKind> = file.hunks[0].lines.iter().map(|l| l.kind).collect();
+        assert_eq!(
+            kinds,
+            [
+                LineKind::Context,
+                LineKind::Deleted,
+                LineKind::Added,
+                LineKind::NoNewlineAtEof
+            ]
+        );
+        assert_eq!(file.hunks[0].section, "fn main");
+
+        let added = from_hunks(
+            None,
+            Some(b"a.txt"),
+            FileChange::Added,
+            b"@@ -0,0 +1 @@\n+x\n",
+        )
+        .unwrap();
+        assert_eq!(added.old_path, None);
+        assert_eq!(added.hunks[0].lines[0].new_lineno, Some(1));
+        let deleted = from_hunks(
+            Some(b"a.txt"),
+            None,
+            FileChange::Deleted,
+            b"@@ -1 +0,0 @@\n-x\n",
+        )
+        .unwrap();
+        assert_eq!(deleted.new_path, None);
+        // No patch from the host (binary, too large): a file without hunks.
+        let empty = from_hunks(Some(b"b.bin"), Some(b"b.bin"), FileChange::Modified, b"").unwrap();
+        assert!(empty.hunks.is_empty());
+        assert!(from_hunks(Some(b"x"), Some(b"x"), FileChange::Modified, b"garbage\n").is_err());
+    }
+}
+
 #[cfg(test)]
 mod option_tests {
     use super::*;

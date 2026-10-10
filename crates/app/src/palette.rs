@@ -63,6 +63,8 @@ pub struct Ctx {
     pub undo: Option<(String, String)>,
     pub pull_default: Option<PullMode>,
     pub prune: bool,
+    /// The Graph is showing, so the sidebar and details docks can be toggled.
+    pub docks: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,12 +198,15 @@ pub fn catalog(ctx: &Ctx) -> Vec<Entry> {
             None,
         ));
     }
-    out.push(entry(Command::ToggleLeftDock, "Toggle the sidebar", None));
-    out.push(entry(
-        Command::ToggleRightDock,
-        "Toggle the details panel",
-        None,
-    ));
+    // The docks belong to the Graph view.
+    if ctx.docks {
+        out.push(entry(Command::ToggleLeftDock, "Toggle the sidebar", None));
+        out.push(entry(
+            Command::ToggleRightDock,
+            "Toggle the details panel",
+            None,
+        ));
+    }
     out.push(entry(Command::ToggleMode, "Switch light / dark mode", None));
     out.push(entry(Command::NextSkin, "Switch theme", None));
     out.push(entry(Command::ZoomIn, "Zoom in", None));
@@ -478,6 +483,7 @@ mod tests {
             undo: None,
             pull_default: Some(PullMode::Rebase),
             prune: true,
+            docks: true,
         }
     }
 

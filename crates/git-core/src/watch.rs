@@ -331,6 +331,8 @@ fn classify_git(rel: &Path, own: bool, set: &mut ChangeSet) {
         return;
     }
     match first {
+        // Fetched pull requests (`pr_ops::PR_REFS`) are no ref the app shows.
+        "refs" if parts.get(1) == Some(&"gitdragon") => {}
         "refs" | "packed-refs" | "FETCH_HEAD" => set.refs = true,
         "ORIG_HEAD" if own => set.refs = true,
         "logs" if parts == ["logs", "refs", "stash"] => set.refs = true,
@@ -463,6 +465,7 @@ mod tests {
             "gc.pid",
             "config",
             "info/refs",
+            "refs/gitdragon/pr/5/head",
             "hooks/pre-commit",
             "AUTO_MERGE",
         ] {

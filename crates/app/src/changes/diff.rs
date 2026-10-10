@@ -15,17 +15,22 @@ use git_core::patch::{self, Direction, Pick};
 use git_core::{ApplyTarget, DiffTarget, GitRepo as _};
 use gpui_kit::component::ActiveTheme as _;
 use gpui_kit::component::button::{Button, ButtonVariants as _};
+use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::scroll::{ScrollableElement as _, ScrollbarAxis};
 use gpui_kit::component::{Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
-    AnyElement, App, ClickEvent, Context, ElementId, Entity, EventEmitter, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, ScrollStrategy, SharedString,
-    StatefulInteractiveElement as _, Styled as _, Subscription, Task, UniformListScrollHandle,
-    Window, div, prelude::FluentBuilder as _, uniform_list,
+    AnyElement, App, ClickEvent, Context, ElementId, Entity, EventEmitter, FocusHandle,
+    InteractiveElement as _, IntoElement, ListHorizontalSizingBehavior, MouseButton,
+    ParentElement as _, Render, ScrollStrategy, SharedString, StatefulInteractiveElement as _,
+    Styled as _, Subscription, Task, UniformListScrollHandle, Window, div,
+    prelude::FluentBuilder as _, uniform_list,
 };
+use ui::diff::copy::{self as diff_copy, RowSelection};
 use ui::diff::{self as diff_ui, DiffModel, DiffRow, Layout};
 use ui::{Palette, zoomed};
 
 use super::Section;
+use crate::diff_select::{self, DiffSelect};
 use crate::file_editor::{Editors, HasEditors, editor_line};
 use crate::repo_tab::RepoTab;
 
@@ -63,6 +68,12 @@ pub struct StagingDiff {
     show_large: bool,
     /// Line staging: picked line indices per hunk.
     picked: BTreeMap<usize, BTreeSet<usize>>,
+    /// Whole rows picked for copying; in a stageable section dragging or shift-clicking also
+    /// picks the changed lines in the range for line staging.
+    sel: RowSelection,
+    /// `picked` when the current drag / shift-click began; the range's lines are added to it.
+    picked_base: BTreeMap<usize, BTreeSet<usize>>,
+    focus: FocusHandle,
     scroll: UniformListScrollHandle,
     seen_generation: u64,
     diff_task: Option<Task<()>>,
@@ -89,6 +100,9 @@ impl StagingDiff {
             layout: Layout::Unified,
             show_large: false,
             picked: BTreeMap::new(),
+            sel: RowSelection::default(),
+            picked_base: BTreeMap::new(),
+            focus: cx.focus_handle(),
             scroll: UniformListScrollHandle::new(),
             seen_generation: 0,
             diff_task: None,
@@ -105,6 +119,7 @@ impl StagingDiff {
         if self.selected.as_ref() != Some(&sel) {
             self.selected = Some(sel);
             self.show_large = false;
+            self.sel.clear();
             self.diff = DiffState::Loading;
             self.scroll.scroll_to_item(0, ScrollStrategy::Top);
         }
@@ -118,6 +133,7 @@ impl StagingDiff {
         self.diff = DiffState::Empty;
         self.diff_task = None;
         self.picked.clear();
+        self.sel.clear();
         cx.notify();
     }
 
@@ -185,6 +201,7 @@ impl StagingDiff {
         let orig = self.entry(&sel, cx).and_then(|e| e.orig_path.clone());
         let theme = cx.theme().highlight_theme.clone();
         self.picked.clear();
+        self.sel.clear();
         self.diff_task = Some(cx.spawn(async move |this, cx| {
             let loaded = cx
                 .background_executor()
@@ -258,6 +275,7 @@ impl StagingDiff {
     /// of a stageable section; a double click opens the file there.
     fn line_clicked(
         &mut self,
+        ix: usize,
         hunk: usize,
         line: usize,
         pickable: bool,
@@ -268,6 +286,11 @@ impl StagingDiff {
         if pickable {
             // The second click of a double click puts back what the first one picked.
             self.toggle_line(hunk, line, cx);
+            // Unpicked again: a lone row selection would still look picked.
+            let still = self.picked.get(&hunk).is_some_and(|s| s.contains(&line));
+            if !still && self.sel.range() == Some(ix..ix + 1) {
+                self.sel.clear();
+            }
         }
         if clicks >= 2 {
             self.edit_file(Some((hunk, line)), window, cx);
@@ -395,7 +418,7 @@ impl StagingDiff {
                     .text_color(palette.emph)
                     .child(SharedString::from(
                         sel.as_ref()
-                            .map(|s| s.path.to_str_lossy().into_owned())
+                            .map(|s| ui::sanitize_line(&s.path.to_str_lossy()).into_owned())
                             .unwrap_or_default(),
                     )),
             )
@@ -514,6 +537,8 @@ impl StagingDiff {
                             Layout::Unified => Layout::Split,
                             Layout::Split => Layout::Unified,
                         };
+                        // Row indices differ between the layouts.
+                        this.sel.clear();
                         cx.notify();
                     })),
             )
@@ -525,7 +550,7 @@ impl StagingDiff {
                 .p_4()
                 .text_sm()
                 .text_color(palette.muted)
-                .child(text)
+                .child(SharedString::from(ui::sanitize_display(&text).into_owned()))
                 .into_any_element()
         };
         let model = match &self.diff {
@@ -560,18 +585,37 @@ impl StagingDiff {
                 .into_any_element();
         }
         let count = model.rows(self.layout).len();
-        uniform_list(
-            "staging-diff",
-            count,
-            cx.processor(move |this, range: Range<usize>, _, cx| {
-                range
-                    .filter_map(|ix| this.render_row(&model, ix, cx))
-                    .collect::<Vec<_>>()
-            }),
-        )
-        .track_scroll(&self.scroll)
-        .flex_1()
-        .into_any_element()
+        let widest = diff_ui::widest_row(&model, self.layout);
+        let view = cx.entity().downgrade();
+        v_flex()
+            .relative()
+            .flex_1()
+            .min_h_0()
+            .child(
+                uniform_list(
+                    "staging-diff",
+                    count,
+                    cx.processor(move |this, range: Range<usize>, _, cx| {
+                        range
+                            .filter_map(|ix| {
+                                let row = this.render_row(&model, ix, cx)?;
+                                Some(diff_select::row(ix, row, cx))
+                            })
+                            .collect::<Vec<_>>()
+                    }),
+                )
+                .track_scroll(&self.scroll)
+                // Long lines scroll sideways: the list is as wide as its widest row.
+                .with_horizontal_sizing_behavior(ListHorizontalSizingBehavior::Unconstrained)
+                .with_width_from_item(widest)
+                // Keeps the overlay scrollbars off the rows' right-hand and bottom edges.
+                .pr_3()
+                .pb_3()
+                .flex_1(),
+            )
+            .scrollbar(&self.scroll, ScrollbarAxis::Both)
+            .context_menu(move |menu, _, _| diff_select::menu(menu, view.clone()))
+            .into_any_element()
     }
 
     fn render_row(
@@ -585,10 +629,14 @@ impl StagingDiff {
         let section = self.selected.as_ref()?.section;
         let busy = self.busy(cx);
         let selectable = matches!(section, Section::Staged | Section::Unstaged);
+        let copy_sel = self.sel.contains(ix);
         Some(match row {
             DiffRow::Hunk { hunk } => {
                 let h = model.file.hunks.get(hunk)?;
-                let mut actions = h_flex().gap_1();
+                // The buttons are not part of the row selection.
+                let mut actions = h_flex()
+                    .gap_1()
+                    .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation());
                 let button = |id: &'static str, label: &'static str| {
                     Button::new(ElementId::NamedInteger(id.into(), hunk as u64))
                         .ghost()
@@ -625,7 +673,11 @@ impl StagingDiff {
                     .w_full()
                     .px_2()
                     .gap_2()
-                    .bg(palette.panel2)
+                    .bg(if copy_sel {
+                        palette.accent_soft
+                    } else {
+                        palette.panel2
+                    })
                     .text_xs()
                     .text_color(palette.muted)
                     .child(
@@ -633,7 +685,9 @@ impl StagingDiff {
                             .flex_1()
                             .min_w_0()
                             .truncate()
-                            .child(SharedString::from(h.header.to_str_lossy().into_owned())),
+                            .child(SharedString::from(
+                                ui::sanitize_line(&h.header.to_str_lossy()).into_owned(),
+                            )),
                     )
                     .child(actions)
                     .into_any_element()
@@ -641,7 +695,7 @@ impl StagingDiff {
             DiffRow::Line { hunk, line } => {
                 let l = model.file.hunks.get(hunk)?.lines.get(line)?;
                 let view = model.lines.get(hunk)?.get(line)?;
-                let picked = self.picked.get(&hunk).is_some_and(|s| s.contains(&line));
+                let picked = copy_sel || self.picked.get(&hunk).is_some_and(|s| s.contains(&line));
                 let changed = matches!(l.kind, LineKind::Added | LineKind::Deleted);
                 div()
                     .id(ElementId::NamedInteger("diff-line".into(), ix as u64))
@@ -649,6 +703,7 @@ impl StagingDiff {
                     .when(selectable && changed, |d| d.cursor_pointer())
                     .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                         this.line_clicked(
+                            ix,
                             hunk,
                             line,
                             selectable && changed,
@@ -677,7 +732,8 @@ impl StagingDiff {
                     else {
                         return diff_ui::filler(&palette, cx).into_any_element();
                     };
-                    let picked = self.picked.get(&hunk).is_some_and(|s| s.contains(&line));
+                    let picked =
+                        copy_sel || self.picked.get(&hunk).is_some_and(|s| s.contains(&line));
                     let changed = matches!(l.kind, LineKind::Added | LineKind::Deleted);
                     let number = if old { l.old_lineno } else { l.new_lineno };
                     div()
@@ -689,6 +745,7 @@ impl StagingDiff {
                         .when(selectable && changed, |d| d.cursor_pointer())
                         .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
                             this.line_clicked(
+                                ix,
                                 hunk,
                                 line,
                                 selectable && changed,
@@ -729,11 +786,56 @@ impl Render for StagingDiff {
                 .child(editor)
                 .into_any_element();
         }
-        v_flex()
-            .size_full()
+        diff_select::container(v_flex().size_full(), &self.focus, cx)
             .bg(palette.panel)
             .child(self.render_header(&palette, cx))
             .child(self.render_body(&palette, cx))
             .into_any_element()
+    }
+}
+
+impl DiffSelect for StagingDiff {
+    fn selection(&mut self) -> &mut RowSelection {
+        &mut self.sel
+    }
+
+    fn focus_handle(&self) -> &FocusHandle {
+        &self.focus
+    }
+
+    /// In a stageable section the changed lines of the range join the picked lines, so a
+    /// dragged range can be staged as well as copied.
+    fn press_started(&mut self) {
+        self.picked_base = self.picked.clone();
+    }
+
+    fn range_extended(&mut self, cx: &mut Context<Self>) {
+        let (Some(rows), DiffState::Ready(model), Some(sel)) =
+            (self.sel.range(), &self.diff, &self.selected)
+        else {
+            return;
+        };
+        if !matches!(sel.section, Section::Staged | Section::Unstaged) {
+            return;
+        }
+        // Derived from the snapshot, so dragging back un-picks the rows left behind.
+        let mut picked = self.picked_base.clone();
+        for (hunk, lines) in diff_copy::changed_lines(model, self.layout, rows) {
+            picked.entry(hunk).or_default().extend(lines);
+        }
+        self.picked = picked;
+        cx.notify();
+    }
+
+    fn copy_selection(&mut self, patch: bool, cx: &mut Context<Self>) {
+        let (Some(rows), DiffState::Ready(model)) = (self.sel.range(), &self.diff) else {
+            return;
+        };
+        let text = if patch {
+            diff_copy::copy_patch(model, self.layout, rows)
+        } else {
+            diff_copy::copy_lines(model, self.layout, rows)
+        };
+        cx.write_to_clipboard(gpui_kit::ClipboardItem::new_string(text));
     }
 }

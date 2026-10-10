@@ -5,6 +5,7 @@
 use std::ffi::OsString;
 use std::io::{BufRead as _, BufReader, Read as _, Write as _};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use interprocess::local_socket::{ListenerOptions, Stream, prelude::*};
 
@@ -17,6 +18,8 @@ pub const KEY_ENV: &str = "GITDRAGON_ASKPASS_KEY";
 
 /// Longest request line accepted (a prompt is a URL plus a few words).
 const MAX_LINE: u64 = 4096;
+/// Requests served at once; more are dropped (git asks one prompt at a time).
+const MAX_CONNECTIONS: usize = 8;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AskKind {
@@ -70,20 +73,40 @@ impl AskpassServer {
     ) -> std::io::Result<Self> {
         let socket = socket_name()?;
         let key = Secret::new(random_hex(32));
-        let listener = ListenerOptions::new()
-            .name(to_name(&socket)?)
-            .create_sync()?;
+        let options = ListenerOptions::new().name(to_name(&socket)?);
+        #[cfg(windows)]
+        let options = {
+            use interprocess::os::windows::local_socket::ListenerOptionsExt as _;
+            use interprocess::os::windows::security_descriptor::SecurityDescriptor;
+            // Protected DACL: only the pipe's owner (this user) and SYSTEM.
+            let sddl = widestring::u16cstr!("D:P(A;;GA;;;OW)(A;;GA;;;SY)");
+            options.security_descriptor(SecurityDescriptor::deserialize(sddl)?)
+        };
+        let listener = options.create_sync()?;
+        let active = Arc::new(AtomicUsize::new(0));
         let resolve: Arc<Resolver> = Arc::new(resolve);
         let expected = key.clone();
         std::thread::Builder::new()
             .name("gitdragon-askpass".into())
             .spawn(move || {
                 for stream in listener.incoming().filter_map(Result::ok) {
-                    let (resolve, expected) = (resolve.clone(), expected.clone());
+                    if active.fetch_add(1, Ordering::AcqRel) >= MAX_CONNECTIONS {
+                        active.fetch_sub(1, Ordering::AcqRel);
+                        tracing::warn!("askpass busy: request dropped");
+                        continue;
+                    }
+                    let (resolve, expected, slot) =
+                        (resolve.clone(), expected.clone(), active.clone());
                     // One short-lived thread per request, so a stuck client blocks nothing.
-                    _ = std::thread::Builder::new()
+                    let spawned = std::thread::Builder::new()
                         .name("gitdragon-askpass-conn".into())
-                        .spawn(move || serve(stream, &expected, resolve.as_ref()));
+                        .spawn(move || {
+                            serve(stream, &expected, resolve.as_ref());
+                            slot.fetch_sub(1, Ordering::AcqRel);
+                        });
+                    if spawned.is_err() {
+                        active.fetch_sub(1, Ordering::AcqRel);
+                    }
                 }
             })?;
         Ok(Self { socket, key })
@@ -107,6 +130,8 @@ impl AskpassServer {
 
 /// One request: `<key>\n<prompt>\n` -> `OK <answer>\n` or `NO\n`.
 fn serve(stream: Stream, expected: &Secret, resolve: &Resolver) {
+    // A client that connects and stays silent must not hold a slot (see MAX_CONNECTIONS).
+    _ = stream.set_recv_timeout(Some(std::time::Duration::from_secs(5)));
     let mut reader = BufReader::new(stream);
     let line = |reader: &mut BufReader<Stream>| -> Option<String> {
         let mut buf = String::new();

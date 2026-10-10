@@ -1,7 +1,7 @@
 # Packages the release build for Windows: portable zip, symbols zip, optional Inno Setup installer, SHA256SUMS.
 # Local only: nothing is uploaded or signed unless the signing hook below is enabled.
 #
-# Usage (from the repo root, after `cargo build --release --locked -p gitdragon`):
+# Usage (from the repo root, after `cargo build --release --locked -p gitdragon -p mcp`):
 #   powershell -File packaging/windows/build.ps1 [-OutDir dist] [-SkipInstaller]
 param(
     [string]$Exe = "target/release/gitdragon.exe",
@@ -9,7 +9,10 @@ param(
     [switch]$SkipInstaller
 )
 $ErrorActionPreference = "Stop"
-if (-not (Test-Path $Exe)) { throw "No binary at $Exe; run: cargo build --release --locked -p gitdragon" }
+if (-not (Test-Path $Exe)) { throw "No binary at $Exe; run: cargo build --release --locked -p gitdragon -p mcp" }
+# gitdragon-mcp ships next to the app: Settings > AI installs it into Claude Code / Desktop from there.
+$Mcp = Join-Path (Split-Path $Exe) "gitdragon-mcp.exe"
+if (-not (Test-Path $Mcp)) { throw "No binary at $Mcp; run: cargo build --release --locked -p gitdragon -p mcp" }
 
 $version = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' | Select-Object -First 1).Matches[0].Groups[1].Value
 $name = "gitdragon-$version-windows-x64"
@@ -29,6 +32,8 @@ function Invoke-Sign([string]$path) {
 
 Copy-Item $Exe $stage
 Invoke-Sign (Join-Path $stage "gitdragon.exe")
+Copy-Item $Mcp $stage
+Invoke-Sign (Join-Path $stage "gitdragon-mcp.exe")
 if (Test-Path README.md) { Copy-Item README.md $stage }
 Copy-Item LICENSE-MIT, LICENSE-APACHE $stage
 
@@ -54,8 +59,9 @@ if (-not $SkipInstaller) {
     }
     if ($iscc) {
         $exeAbs = (Resolve-Path $Exe).Path
+        $mcpAbs = (Resolve-Path $Mcp).Path
         $outAbs = (Resolve-Path $OutDir).Path
-        & $iscc "/DAppVersion=$version" "/DSourceExe=$exeAbs" "/DOutDir=$outAbs" "$PSScriptRoot\gitdragon.iss"
+        & $iscc "/DAppVersion=$version" "/DSourceExe=$exeAbs" "/DSourceMcp=$mcpAbs" "/DOutDir=$outAbs" "$PSScriptRoot\gitdragon.iss"
         if ($LASTEXITCODE) { throw "iscc failed" }
         Invoke-Sign (Join-Path $OutDir "GitDragon-$version-windows-x64-setup.exe")
     } else {

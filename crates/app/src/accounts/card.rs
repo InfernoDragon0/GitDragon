@@ -215,7 +215,7 @@ impl AccountsCard {
                     if let Some(sign_in) = &mut this.sign_in {
                         sign_in.device = Some((code.user_code.clone().into(), page.clone().into()));
                     }
-                    cx.open_url(&page);
+                    crate::links::open(&page, None, cx);
                     cx.notify();
                 });
                 let result = cx
@@ -242,7 +242,7 @@ impl AccountsCard {
                 }
             };
             let cancel = login.canceller();
-            cx.open_url(&login.authorize_url);
+            crate::links::open_for_base(&login.authorize_url, &base, Some(window), cx);
             let task = cx.spawn_in(window, async move |this, cx| {
                 let result = cx
                     .background_executor()
@@ -1027,7 +1027,9 @@ impl Render for AccountsCard {
                             .ghost()
                             .small()
                             .label("Open page again")
-                            .on_click(move |_: &ClickEvent, _, cx| cx.open_url(&page)),
+                            .on_click(move |_: &ClickEvent, window, cx| {
+                                crate::links::open(&page, Some(window), cx)
+                            }),
                     ),
             );
         }

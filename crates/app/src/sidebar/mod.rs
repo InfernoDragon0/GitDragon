@@ -13,6 +13,7 @@ use gpui_kit::assets::IconName;
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::ContextMenuExt as _;
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Icon, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, EventEmitter,
@@ -191,7 +192,7 @@ impl SidebarPanel {
                 .min_w_0()
                 .truncate()
                 .text_color(color)
-                .child(SharedString::from(text))
+                .child(SharedString::from(ui::sanitize_line(&text).into_owned()))
         };
         let chip = |text: String, color: Hsla| {
             div()
@@ -222,7 +223,7 @@ impl SidebarPanel {
                     })
                     .xsmall(),
                 )
-                .child(div().text_color(palette.emph).child(section.label()))
+                .child(ui::typography::section_title(section.label(), cx).text_color(palette.emph))
                 .child(div().flex_1().child(SharedString::from(count.to_string())))
                 .into_any_element(),
             Row::Local {
@@ -288,7 +289,10 @@ impl SidebarPanel {
                 )
                 .when_some(url, |d, url| {
                     d.tooltip(move |window, cx| {
-                        gpui_kit::component::tooltip::Tooltip::new(url.clone()).build(window, cx)
+                        gpui_kit::component::tooltip::Tooltip::new(
+                            ui::sanitize_line(&url).into_owned(),
+                        )
+                        .build(window, cx)
                     })
                 })
                 .into_any_element(),
@@ -390,18 +394,27 @@ impl Render for SidebarPanel {
                 .child("Open a repository to see its branches.")
                 .into_any_element()
         } else {
-            uniform_list(
-                "sidebar-rows",
-                self.rows.len(),
-                cx.processor(|this, range: Range<usize>, _, cx| {
-                    range
-                        .filter_map(|ix| this.render_row(ix, cx))
-                        .collect::<Vec<_>>()
-                }),
-            )
-            .track_scroll(&self.scroll)
-            .flex_1()
-            .into_any_element()
+            v_flex()
+                .relative()
+                .flex_1()
+                .min_h_0()
+                .child(
+                    uniform_list(
+                        "sidebar-rows",
+                        self.rows.len(),
+                        cx.processor(|this, range: Range<usize>, _, cx| {
+                            range
+                                .filter_map(|ix| this.render_row(ix, cx))
+                                .collect::<Vec<_>>()
+                        }),
+                    )
+                    .track_scroll(&self.scroll)
+                    // Keeps the overlay scrollbar off the rows' right-hand badges.
+                    .pr_3()
+                    .flex_1(),
+                )
+                .vertical_scrollbar(&self.scroll)
+                .into_any_element()
         };
         v_flex()
             .size_full()

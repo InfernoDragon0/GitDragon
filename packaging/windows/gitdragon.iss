@@ -11,6 +11,9 @@
 #ifndef SourceExe
   #define SourceExe "..\..\target\release\gitdragon.exe"
 #endif
+#ifndef SourceMcp
+  #define SourceMcp "..\..\target\release\gitdragon-mcp.exe"
+#endif
 #ifndef OutDir
   #define OutDir "..\..\dist"
 #endif
@@ -47,6 +50,7 @@ UninstallDisplayIcon={app}\gitdragon.exe
 
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "{#SourceMcp}"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE-MIT"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\..\LICENSE-APACHE"; DestDir: "{app}"; Flags: ignoreversion
 

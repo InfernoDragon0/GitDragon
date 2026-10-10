@@ -6,6 +6,7 @@ pub mod conflicts;
 pub mod detect;
 pub mod error;
 pub mod graph;
+mod guard;
 pub mod history_ops;
 pub mod lfs;
 pub mod maintenance;

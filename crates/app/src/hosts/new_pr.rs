@@ -306,7 +306,10 @@ impl NewPrForm {
             .outline()
             .icon(gpui_kit::assets::IconName::GitBranch)
             .label(SharedString::from(
-                current.clone().unwrap_or_else(|| "Choose\u{2026}".into()),
+                current
+                    .as_deref()
+                    .map(|c| ui::sanitize_line(c).into_owned())
+                    .unwrap_or_else(|| "Choose\u{2026}".into()),
             ))
             .disabled(self.busy.is_some() || names.is_empty())
             .dropdown_menu(move |menu, _, _| {
@@ -314,12 +317,13 @@ impl NewPrForm {
                 for name in &names {
                     let (this, picked) = (this.clone(), name.clone());
                     menu = menu.item(
-                        PopupMenuItem::new(SharedString::from(name.clone())).on_click(
-                            move |_, window, cx| {
-                                let picked = picked.clone();
-                                _ = this.update(cx, |form, cx| pick(form, picked, window, cx));
-                            },
-                        ),
+                        PopupMenuItem::new(SharedString::from(
+                            ui::sanitize_line(name).into_owned(),
+                        ))
+                        .on_click(move |_, window, cx| {
+                            let picked = picked.clone();
+                            _ = this.update(cx, |form, cx| pick(form, picked, window, cx));
+                        }),
                     );
                 }
                 menu
@@ -391,7 +395,14 @@ impl Render for NewPrForm {
                 )
             })
             .when_some(self.error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(palette.error).child(error))
+                d.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.error)
+                        .child(SharedString::from(
+                            ui::sanitize_display(&error).into_owned(),
+                        )),
+                )
             })
             .when_some(self.busy.clone(), |d, text| {
                 d.child(div().text_sm().text_color(palette.muted).child(text))

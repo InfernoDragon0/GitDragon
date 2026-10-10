@@ -94,7 +94,7 @@ impl OpStrip {
     }
 
     pub fn set_undo(&mut self, undo: Option<String>, cx: &mut Context<Self>) {
-        let undo = undo.map(SharedString::from);
+        let undo = undo.map(|u| SharedString::from(ui::sanitize_line(&u).into_owned()));
         if self.undo != undo {
             self.undo = undo;
             cx.notify();
@@ -102,7 +102,7 @@ impl OpStrip {
     }
 
     pub fn set_branch(&mut self, branch: Option<String>, cx: &mut Context<Self>) {
-        let branch = branch.map(SharedString::from);
+        let branch = branch.map(|b| SharedString::from(ui::sanitize_line(&b).into_owned()));
         if self.branch != branch {
             self.branch = branch;
             cx.notify();
@@ -169,7 +169,7 @@ impl Render for OpStrip {
                     .flex_1()
                     .min_w_0()
                     .truncate()
-                    .child(SharedString::from(text)),
+                    .child(SharedString::from(ui::sanitize_line(&text).into_owned())),
             )
             .children(
                 self.undo

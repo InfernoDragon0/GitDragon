@@ -108,6 +108,7 @@ fn pull_requests_map_status_and_refs() {
     assert_eq!(draft.source_branch, "feature/azure");
     assert_eq!(draft.target_branch, "main");
     assert_eq!(draft.head_sha, SHA_A);
+    assert_eq!(draft.base_sha, None, "fixture has no lastMergeTargetCommit");
     assert_eq!(draft.body.as_deref(), Some("Adds the **provider**."));
     assert_eq!(draft.labels.len(), 1, "inactive label dropped");
     assert_eq!(draft.labels[0].name, "backend");
@@ -807,4 +808,20 @@ fn closing_a_work_item_tries_the_process_states() {
 fn azure_has_no_head_refs_to_fetch() {
     let (_, az) = setup(false, Duration::ZERO);
     assert_eq!(az.pull_head_ref(9), None);
+}
+
+#[test]
+fn azure_changes_come_from_the_merge_preview() {
+    let (_, az) = setup(false, Duration::ZERO);
+    assert_eq!(
+        az.pull_changes_ref(9),
+        Some(PullRef {
+            reference: "pull/9/merge".into(),
+            merge_preview: true
+        })
+    );
+    // No file list from the API: the merge preview is the only source.
+    assert!(!az.supports(Feature::PrFiles));
+    let err = block_on(az.pr_files(&repo(), 9)).unwrap_err();
+    assert!(matches!(err, HostError::Unsupported(Feature::PrFiles)));
 }

@@ -166,8 +166,12 @@ pub fn language_for(path: &str) -> Option<&'static str> {
 /// The worktree file `rel` (a repo-relative path from git) under `root`; refuses paths that are
 /// absolute or climb out of the worktree.
 pub fn target_path(root: &Path, rel: &[u8]) -> Result<PathBuf, Refusal> {
-    git_core::ops::validate_repo_path(rel).map_err(|e| Refusal::Io(e.to_string()))?;
-    Ok(root.join(rel.to_path_lossy()))
+    git_core::ops::worktree_file(root, rel).map_err(|e| match e {
+        git_core::GitError::InvalidArgument { what, .. } if what == git_core::ops::LINKED_PATH => {
+            Refusal::Symlink
+        }
+        e => Refusal::Io(e.to_string()),
+    })
 }
 
 /// The 1-based line a diff line stands for in the new file: its own, else the nearest one after

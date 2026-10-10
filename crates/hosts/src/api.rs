@@ -6,6 +6,9 @@
 //! - Rate limits come from `x-ratelimit-*` / `ratelimit-*` / `retry-after`. While blocked, GETs
 //!   answer from the cache (marked stale) or fail with [`HostError::RateLimited`] without
 //!   touching the network.
+//! - Quotas are tracked per [`Bucket`] (GitHub counts REST, GraphQL and search separately), so
+//!   a spent GraphQL quota never blocks the REST calls. A `429` / `retry-after` (secondary
+//!   limit) blocks every bucket.
 //! - Per-repo invalidation drops every cached URL under `repos/<owner>/<repo>`.
 
 use std::collections::HashMap;
@@ -39,12 +42,50 @@ impl RateLimit {
     }
 }
 
+/// Which quota a request spends (GitHub's `x-ratelimit-resource`, told apart by URL).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+enum Bucket {
+    Core,
+    GraphQl,
+    Search,
+}
+
+impl Bucket {
+    fn of(url: &Url) -> Self {
+        let path = url.path();
+        if path.ends_with("/graphql") {
+            Bucket::GraphQl
+        } else if path.contains("/search/") {
+            Bucket::Search
+        } else {
+            Bucket::Core
+        }
+    }
+}
+
+#[derive(Default)]
+struct Rates {
+    buckets: HashMap<Bucket, RateLimit>,
+    /// Secondary limit (`429`, `retry-after`): every bucket waits.
+    all_blocked_until: Option<SystemTime>,
+}
+
+impl Rates {
+    fn get(&self, bucket: Bucket) -> RateLimit {
+        let mut rate = self.buckets.get(&bucket).copied().unwrap_or_default();
+        rate.blocked_until = rate.blocked_until.max(self.all_blocked_until);
+        rate
+    }
+}
+
 /// A GET answer.
 #[derive(Debug, Clone)]
 pub struct Fetched {
     pub body: Arc<[u8]>,
     /// The `Link` header (or `x-next-page`) points at another page.
     pub next_page: bool,
+    /// The last page number: the `Link` header's `rel="last"`, or `x-total-pages`.
+    pub last_page: Option<u32>,
     /// Served from the cache because the host could not be asked (rate limit, offline).
     pub stale: bool,
 }
@@ -56,6 +97,7 @@ struct Entry {
     last_modified: Option<String>,
     body: Arc<[u8]>,
     next_page: bool,
+    last_page: Option<u32>,
 }
 
 impl Entry {
@@ -63,6 +105,7 @@ impl Entry {
         Fetched {
             body: self.body.clone(),
             next_page: self.next_page,
+            last_page: self.last_page,
             stale,
         }
     }
@@ -76,7 +119,7 @@ pub struct ApiClient {
     auth: RwLock<Option<Auth>>,
     ttl: Duration,
     cache: Mutex<HashMap<String, Entry>>,
-    rate: Mutex<RateLimit>,
+    rate: Mutex<Rates>,
 }
 
 fn lock<T>(m: &Mutex<T>) -> MutexGuard<'_, T> {
@@ -114,8 +157,15 @@ impl ApiClient {
         &self.host
     }
 
+    /// The REST quota (what the panels spend), including a secondary-limit block.
     pub fn rate_limit(&self) -> RateLimit {
-        *lock(&self.rate)
+        lock(&self.rate).get(Bucket::Core)
+    }
+
+    fn blocked(&self, url: &Url) -> Option<SystemTime> {
+        lock(&self.rate)
+            .get(Bucket::of(url))
+            .blocked(SystemTime::now())
     }
 
     /// `base/segment/segment?query`, each segment percent-encoded.
@@ -182,12 +232,13 @@ impl ApiClient {
         {
             return Ok(entry.answer(false));
         }
-        if let Some(until) = self.rate_limit().blocked(SystemTime::now()) {
+        if let Some(until) = self.blocked(&url) {
             return match &cached {
                 Some(entry) => Ok(entry.answer(true)),
                 None => Err(self.rate_limited(until)),
             };
         }
+        let bucket = Bucket::of(&url);
         let mut request = self.request(Method::Get, url);
         if let Some(entry) = &cached {
             if let Some(etag) = &entry.etag {
@@ -209,7 +260,7 @@ impl ApiClient {
             }
             Err(err) => return Err(err),
         };
-        self.note_rate(&response);
+        self.note_rate(bucket, &response);
         match response.status {
             304 => {
                 let mut cache = lock(&self.cache);
@@ -229,13 +280,14 @@ impl ApiClient {
                     etag: response.header("etag").map(str::to_owned),
                     last_modified: response.header("last-modified").map(str::to_owned),
                     next_page: has_next_page(&response),
+                    last_page: last_page(&response),
                     body: response.body.into(),
                 };
                 let answer = entry.answer(false);
                 lock(&self.cache).insert(key, entry);
                 Ok(answer)
             }
-            _ => Err(self.error(&response)),
+            _ => Err(self.error(bucket, &response)),
         }
     }
 
@@ -250,7 +302,7 @@ impl ApiClient {
         {
             return Ok(entry.answer(false));
         }
-        if let Some(until) = self.rate_limit().blocked(SystemTime::now()) {
+        if let Some(until) = self.blocked(&url) {
             return match &cached {
                 Some(entry) => Ok(entry.answer(true)),
                 None => Err(self.rate_limited(until)),
@@ -263,6 +315,7 @@ impl ApiClient {
                     etag: None,
                     last_modified: None,
                     next_page: false,
+                    last_page: None,
                     body: answer.into(),
                 };
                 let fetched = entry.answer(false);
@@ -297,9 +350,10 @@ impl ApiClient {
         body: &Value,
         content_type: Option<&str>,
     ) -> Result<Vec<u8>, HostError> {
-        if let Some(until) = self.rate_limit().blocked(SystemTime::now()) {
+        if let Some(until) = self.blocked(&url) {
             return Err(self.rate_limited(until));
         }
+        let bucket = Bucket::of(&url);
         let mut request = self.request(method, url);
         if let Some(content_type) = content_type {
             request
@@ -308,11 +362,11 @@ impl ApiClient {
         }
         request.body = Some(serde_json::to_vec(body).expect("JSON value"));
         let response = send_following(self.transport.as_ref(), request).await?;
-        self.note_rate(&response);
+        self.note_rate(bucket, &response);
         if (200..300).contains(&response.status) {
             Ok(response.body)
         } else {
-            Err(self.error(&response))
+            Err(self.error(bucket, &response))
         }
     }
 
@@ -327,14 +381,15 @@ impl ApiClient {
         }
     }
 
-    fn note_rate(&self, response: &Response) {
+    fn note_rate(&self, bucket: Bucket, response: &Response) {
         let number = |names: [&str; 2]| {
             names
                 .iter()
                 .find_map(|n| response.header(n))
                 .and_then(|v| v.trim().parse::<u64>().ok())
         };
-        let mut rate = lock(&self.rate);
+        let mut rates = lock(&self.rate);
+        let rate = rates.buckets.entry(bucket).or_default();
         let remaining = number(["x-ratelimit-remaining", "ratelimit-remaining"]);
         if remaining.is_some() {
             rate.limit = number(["x-ratelimit-limit", "ratelimit-limit"]).map(clamp_u32);
@@ -343,34 +398,47 @@ impl ApiClient {
                 .map(|s| UNIX_EPOCH + Duration::from_secs(s));
         }
         let now = SystemTime::now();
-        rate.blocked_until = match (rate.remaining, rate.reset_at) {
-            (Some(0), Some(reset)) if remaining.is_some() && reset > now => Some(reset),
+        // A limit of 0 is no quota at all (GitHub's GraphQL without a token): not a wait.
+        rate.blocked_until = match (rate.limit, rate.remaining, rate.reset_at) {
+            (Some(1..), Some(0), Some(reset)) if remaining.is_some() && reset > now => Some(reset),
             _ => rate.blocked_until.filter(|t| *t > now),
         };
     }
 
     /// Maps a failed response; a rate-limit answer also blocks further calls until it ends.
-    fn error(&self, response: &Response) -> HostError {
+    fn error(&self, bucket: Bucket, response: &Response) -> HostError {
         let message = error_message(&response.body);
         let status = response.status;
-        let rate = self.rate_limit();
+        let host = self.host.clone();
+        let rate = lock(&self.rate).get(bucket);
+        // No quota at all is not a wait: GitHub answers GraphQL without a token like this.
+        if status == 403 && rate.limit == Some(0) {
+            return HostError::Forbidden {
+                host,
+                message: "this needs a signed-in account (OAuth or a personal access token)".into(),
+            };
+        }
+        let retry_after = response.header("retry-after");
         let limited = status == 429
             || (status == 403
-                && (response.header("retry-after").is_some()
+                && (retry_after.is_some()
                     || rate.remaining == Some(0)
                     || message.to_ascii_lowercase().contains("rate limit")));
         if limited {
             let now = SystemTime::now();
-            let until = response
-                .header("retry-after")
+            let until = retry_after
                 .and_then(|v| v.trim().parse::<u64>().ok())
                 .map(|s| now + Duration::from_secs(s))
                 .or(rate.reset_at.filter(|t| *t > now))
                 .unwrap_or(now + DEFAULT_BLOCK);
-            lock(&self.rate).blocked_until = Some(until);
+            let mut rates = lock(&self.rate);
+            if status == 429 || retry_after.is_some() {
+                rates.all_blocked_until = Some(until);
+            } else {
+                rates.buckets.entry(bucket).or_default().blocked_until = Some(until);
+            }
             return self.rate_limited(until);
         }
-        let host = self.host.clone();
         match status {
             401 => HostError::Unauthorized { host },
             403 => HostError::Forbidden { host, message },
@@ -396,6 +464,23 @@ fn has_next_page(response: &Response) -> bool {
     link || response
         .header("x-next-page")
         .is_some_and(|n| !n.trim().is_empty())
+}
+
+/// The `page` of the `Link` header's `rel="last"` URL, else GitLab's `x-total-pages`.
+fn last_page(response: &Response) -> Option<u32> {
+    let from_link = response.header("link").and_then(|link| {
+        let part = link.split(',').find(|p| p.contains("rel=\"last\""))?;
+        let url = part.trim().strip_prefix('<')?.split('>').next()?;
+        let url = Url::parse(url).ok()?;
+        url.query_pairs()
+            .find(|(k, _)| k == "page")
+            .and_then(|(_, v)| v.parse().ok())
+    });
+    from_link.or_else(|| {
+        response
+            .header("x-total-pages")
+            .and_then(|n| n.trim().parse().ok())
+    })
 }
 
 /// `message` (+ GitHub's `errors[].message` / GitLab's `error`) from an error body, redacted
@@ -477,5 +562,20 @@ mod tests {
         )])));
         assert!(has_next_page(&response(vec![("x-next-page", "3")])));
         assert!(!has_next_page(&response(vec![("x-next-page", "")])));
+        assert_eq!(
+            last_page(&response(vec![(
+                "link",
+                "<https://api.github.com/x?per_page=100&page=2>; rel=\"next\", <https://api.github.com/x?per_page=100&page=5>; rel=\"last\""
+            )])),
+            Some(5)
+        );
+        assert_eq!(last_page(&response(vec![("x-total-pages", "7")])), Some(7));
+        assert_eq!(
+            last_page(&response(vec![(
+                "link",
+                "<https://api.github.com/x?page=1>; rel=\"prev\""
+            )])),
+            None
+        );
     }
 }

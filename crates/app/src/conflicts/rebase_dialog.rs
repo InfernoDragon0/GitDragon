@@ -6,11 +6,12 @@ use git_core::conflicts::{RebaseCommit, TodoAction, TodoItem};
 use gpui_kit::assets::IconName;
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Input, InputState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{Disableable as _, Sizable as _, WindowExt as _, h_flex, v_flex};
 use gpui_kit::{
     App, AppContext as _, ClickEvent, Context, ElementId, Entity, InteractiveElement as _,
-    IntoElement, ParentElement as _, Render, SharedString, StatefulInteractiveElement as _,
-    Styled as _, Window, div, prelude::FluentBuilder as _, px,
+    IntoElement, ParentElement as _, Render, SharedString, Styled as _, Window, div,
+    prelude::FluentBuilder as _, px,
 };
 use ui::Palette;
 
@@ -281,7 +282,9 @@ impl Render for RebaseDialog {
                                 .text_sm()
                                 .text_color(if dropped { palette.muted } else { palette.fg })
                                 .when(dropped, |d| d.line_through())
-                                .child(SharedString::from(row.commit.subject.clone())),
+                                .child(SharedString::from(
+                                    ui::sanitize_line(&row.commit.subject).into_owned(),
+                                )),
                         )
                         .child(kinds),
                 )
@@ -312,7 +315,7 @@ impl Render for RebaseDialog {
                 v_flex()
                     .id("rebase-rows")
                     .max_h(px(420.))
-                    .overflow_y_scroll()
+                    .overflow_y_scrollbar()
                     .children(rows),
             )
             .when_some(self.error.clone(), |d, error| {

@@ -4,6 +4,7 @@
 use ai::{Decision, Item, Phase, ToolCall, ToolStatus};
 use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::input::{InputEvent, Textarea, TextareaState};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::text::TextView;
 use gpui_kit::component::{
     ActiveTheme as _, Disableable as _, Icon, IconName, Sizable as _, h_flex, v_flex,
@@ -20,6 +21,7 @@ use super::ChatSession;
 use crate::repo_tab::RepoTab;
 
 pub struct ChatView {
+    #[allow(dead_code)]
     tab: Entity<RepoTab>,
     session: Entity<ChatSession>,
     input: Entity<TextareaState>,
@@ -423,7 +425,6 @@ impl Render for ChatView {
         let expanded = session.expanded.clone();
         let agent = session.chat.agent.clone();
         let first_pending = session.chat.pending_permissions().first().copied();
-        let name = self.tab.read(cx).name.clone();
 
         let mut rows: Vec<AnyElement> = Vec::new();
         for (ix, item) in items.iter().enumerate() {
@@ -533,45 +534,40 @@ impl Render for ChatView {
             (Phase::Idle, _) => "Not started".to_string(),
         };
 
-        let header = h_flex()
-            .px_3()
-            .h(ui::zoomed(36., cx))
-            .gap_2()
-            .flex_none()
-            .border_b_1()
-            .border_color(palette.border)
-            .child(Icon::new(IconName::Bot).small().text_color(palette.accent))
-            .child(
-                div()
-                    .text_sm()
-                    .text_color(palette.emph)
-                    .child(SharedString::from(format!("{name} \u{00B7} Chat"))),
-            )
-            .child(
-                div()
-                    .flex_1()
-                    .min_w_0()
-                    .truncate()
-                    .text_xs()
-                    .text_color(palette.muted)
-                    .child(SharedString::from(status)),
-            )
-            .child(
-                Button::new("chat-new")
-                    .ghost()
-                    .xsmall()
-                    .label("New chat")
-                    .tooltip("Stop the agent and clear the conversation")
-                    .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
-                        this.session.update(cx, |s, cx| s.reset(cx))
-                    })),
-            );
+        let header = crate::page_header::page_header(
+            "Chat",
+            "Ask Claude about this repository.",
+            Some(
+                h_flex()
+                    .gap_2()
+                    .items_center()
+                    .child(
+                        div()
+                            .min_w_0()
+                            .truncate()
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child(SharedString::from(status)),
+                    )
+                    .child(
+                        Button::new("chat-new")
+                            .ghost()
+                            .small()
+                            .label("New chat")
+                            .tooltip("Stop the agent and clear the conversation")
+                            .on_click(cx.listener(|this, _: &ClickEvent, _, cx| {
+                                this.session.update(cx, |s, cx| s.reset(cx))
+                            })),
+                    )
+                    .into_any_element(),
+            ),
+            cx,
+        );
 
         let empty = rows.is_empty() && setup.is_none();
         let body = div()
             .id("chat-messages")
-            .flex_1()
-            .min_h_0()
+            .size_full()
             .overflow_y_scroll()
             .track_scroll(&self.scroll)
             .child(
@@ -591,11 +587,7 @@ impl Render for ChatView {
                                 .items_center()
                                 .gap_1()
                                 .text_center()
-                                .child(
-                                    div()
-                                        .text_color(palette.emph)
-                                        .child("Chat with Claude Code"),
-                                )
+                                .child(ui::typography::subtitle("Chat with Claude Code", cx))
                                 .child(div().text_sm().text_color(palette.muted).child(
                                     "It works in this repository's folder. Tools that change \
                                          anything ask first; nothing is allowed unless you say so.",
@@ -641,7 +633,14 @@ impl Render for ChatView {
             .track_focus(&self.focus)
             .bg(palette.bg)
             .child(header)
-            .child(body)
+            .child(
+                div()
+                    .relative()
+                    .flex_1()
+                    .min_h_0()
+                    .child(body)
+                    .vertical_scrollbar(&self.scroll),
+            )
             .child(footer)
     }
 }

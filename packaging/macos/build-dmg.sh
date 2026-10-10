@@ -13,6 +13,7 @@ APP="$OUT/GitDragon.app"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 cp "$BIN" "$APP/Contents/MacOS/gitdragon"
+cp "$(dirname "$BIN")/gitdragon-mcp" "$APP/Contents/MacOS/gitdragon-mcp"   # next to the app, where Settings > AI finds it
 sed "s/@VERSION@/$VERSION/g" "$HERE/Info.plist" > "$APP/Contents/Info.plist"
 # TODO(icon): generate gitdragon.icns from the logo (iconutil) and copy it to Contents/Resources.
 [ -f "$HERE/gitdragon.icns" ] && cp "$HERE/gitdragon.icns" "$APP/Contents/Resources/"

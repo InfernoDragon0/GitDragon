@@ -39,7 +39,7 @@ const BASE_FLAGS: &[&str] = &[
 ];
 
 /// Extra global options for background reads.
-fn read_flags() -> [&'static str; 6] {
+fn read_flags() -> [&'static str; 8] {
     // A hooks dir that cannot exist, so no hook (e.g. post-index-change) can run.
     let no_hooks = if cfg!(windows) {
         "core.hooksPath=NUL"
@@ -52,6 +52,8 @@ fn read_flags() -> [&'static str; 6] {
         "core.fsmonitor=false",
         "-c",
         no_hooks,
+        "-c",
+        "protocol.ext.allow=never",
         "--no-replace-objects",
     ]
 }
@@ -117,6 +119,8 @@ pub struct GitCommand {
     lfs_progress: Option<PathBuf>,
     /// Extra variables for this command only (editor overrides for continue / rebase).
     env: Vec<(OsString, OsString)>,
+    /// A write command nobody asked for (auto-fetch): hardened like a read.
+    background: bool,
 }
 
 impl GitCommand {
@@ -139,6 +143,7 @@ impl GitCommand {
             stdin: None,
             lfs_progress: None,
             env: Vec::new(),
+            background: false,
         }
     }
 
@@ -206,6 +211,18 @@ impl GitCommand {
         self
     }
 
+    /// Marks a write command the user didn't start (auto-fetch): it gets the read hardening
+    /// (no hooks, no fsmonitor) and the repo-local config overrides of [`crate::guard`].
+    pub fn background(mut self) -> Self {
+        self.background = true;
+        self
+    }
+
+    /// Read or background: repo-local config must not pick programs to run.
+    fn guarded(&self) -> bool {
+        self.mode == Mode::Read || self.background
+    }
+
     pub fn stdin(mut self, input: Vec<u8>) -> Self {
         self.stdin = Some(input);
         self
@@ -244,12 +261,23 @@ impl GitCommand {
     fn to_command(&self, git: &GitBinary) -> async_process::Command {
         let mut cmd = std::process::Command::new(&git.path);
         cmd.args(BASE_FLAGS);
-        if self.mode == Mode::Read {
+        if self.guarded() {
             cmd.args(read_flags());
             cmd.env("GIT_OPTIONAL_LOCKS", "0");
         }
         cmd.args(&self.args).current_dir(&self.cwd);
         harden_std_command(&mut cmd);
+        if self.guarded() {
+            let guard = crate::guard::overrides(&git.path, &self.cwd);
+            cmd.env("GIT_CONFIG_COUNT", guard.config.len().to_string());
+            for (i, (key, value)) in guard.config.iter().enumerate() {
+                cmd.env(format!("GIT_CONFIG_KEY_{i}"), key)
+                    .env(format!("GIT_CONFIG_VALUE_{i}"), value);
+            }
+            for (key, value) in &guard.env {
+                cmd.env(key, value);
+            }
+        }
         if self.literal_pathspecs {
             cmd.env("GIT_LITERAL_PATHSPECS", "1");
         }
@@ -319,7 +347,7 @@ impl GitOutput {
 pub struct GitRunner {
     git: Arc<GitBinary>,
     log: CommandLog,
-    /// Extra variables for every spawned git (the askpass hook). Never holds secrets.
+    /// Extra variables for every write command (the askpass hook). Never holds secrets.
     env: Arc<Mutex<Vec<(OsString, OsString)>>>,
 }
 
@@ -543,8 +571,11 @@ impl GitRunner {
     fn spawn(&self, cmd: &GitCommand) -> Result<Child> {
         tracing::debug!(command = %cmd.display(), cwd = %cmd.cwd.display(), "git");
         let mut command = cmd.to_command(&self.git);
-        for (key, value) in self.env.lock().unwrap_or_else(|p| p.into_inner()).iter() {
-            command.env(key, value);
+        // Reads never authenticate, so their hooks / filters never see the askpass hook.
+        if cmd.mode == Mode::Write {
+            for (key, value) in self.env.lock().unwrap_or_else(|p| p.into_inner()).iter() {
+                command.env(key, value);
+            }
         }
         command.spawn().map_err(|source| GitError::Spawn {
             program: self.git.path.clone(),
@@ -770,10 +801,14 @@ impl LfsProgress {
         if cmd.mode != Mode::Write {
             return None;
         }
-        let file = std::env::temp_dir().join(format!(
-            "gitdragon-lfs-{}-{id}.progress",
-            std::process::id()
-        ));
+        let file = tempfile::Builder::new()
+            .prefix(&format!("gitdragon-lfs-{id}-"))
+            .suffix(".progress")
+            .tempfile()
+            .ok()?
+            .into_temp_path()
+            .keep()
+            .ok()?;
         cmd.lfs_progress = Some(file.clone());
         Some(Self { id, file })
     }

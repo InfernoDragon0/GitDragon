@@ -24,6 +24,10 @@ const API_VERSION: &str = "2022-11-28";
 #[path = "boards/gh.rs"]
 mod boards;
 
+/// Comments, events, reviews and review comments.
+#[path = "threads/gh.rs"]
+mod threads;
+
 pub struct GitHub {
     api: ApiClient,
     /// Web base, e.g. `https://github.com`.
@@ -107,6 +111,7 @@ impl GitHub {
         Ok(Page {
             items: raw.into_iter().filter_map(map).collect(),
             next: fetched.next_page.then_some(page + 1),
+            last: fetched.last_page,
         })
     }
 }
@@ -153,6 +158,10 @@ impl GitHost for GitHub {
                 | Feature::CiStatus
                 | Feature::Avatars
                 | Feature::Boards
+                | Feature::Timeline
+                | Feature::Reviews
+                | Feature::ReviewComments
+                | Feature::PrFiles
         )
     }
 
@@ -348,6 +357,55 @@ impl GitHost for GitHub {
         Ok(self.api.decode::<GhIssue>(&answer)?.into())
     }
 
+    async fn timeline(
+        &self,
+        repo: &RepoId,
+        thread: Thread,
+        page: u32,
+    ) -> HostResult<Page<TimelineItem>> {
+        threads::timeline(self, repo, thread, page).await
+    }
+
+    async fn pr_reviews(&self, repo: &RepoId, number: u64, page: u32) -> HostResult<Page<Review>> {
+        threads::reviews(self, repo, number, page).await
+    }
+
+    async fn pr_review_comments(
+        &self,
+        repo: &RepoId,
+        number: u64,
+        page: u32,
+    ) -> HostResult<Page<ReviewComment>> {
+        threads::review_comments(self, repo, number, page).await
+    }
+
+    /// `pulls/{n}/files`, 100 a page, up to GitHub's 3000; `patch` is missing for binary and
+    /// very large files.
+    async fn pr_files(&self, repo: &RepoId, number: u64) -> HostResult<PrFiles> {
+        let n = number.to_string();
+        let per_page = PR_FILES_PER_PAGE.to_string();
+        let mut out = PrFiles::default();
+        for page in 1..=PR_FILES_MAX_PAGES {
+            let p = page.to_string();
+            let url = self.repo_url(
+                repo,
+                &["pulls", &n, "files"],
+                &[("per_page", &per_page), ("page", &p)],
+            );
+            let fetched = self.api.get(url).await?;
+            let raw: Vec<GhFile> = self.api.decode(&fetched.body)?;
+            out.files.extend(raw.into_iter().map(PrFile::from));
+            if !fetched.next_page {
+                // A host may stop at its cap without saying so.
+                out.truncated =
+                    out.files.len() as u64 >= u64::from(PR_FILES_PER_PAGE * PR_FILES_MAX_PAGES);
+                return Ok(out);
+            }
+        }
+        out.truncated = true;
+        Ok(out)
+    }
+
     /// Check runs (Actions and apps) plus legacy commit statuses. A token without the checks
     /// permission still gets the statuses.
     async fn ci_status(&self, repo: &RepoId, reference: &str) -> HostResult<CiStatus> {
@@ -535,6 +593,41 @@ struct GhLabel {
     color: Option<String>,
 }
 
+#[derive(Deserialize)]
+struct GhFile {
+    filename: String,
+    #[serde(default)]
+    previous_filename: Option<String>,
+    status: String,
+    #[serde(default)]
+    additions: u32,
+    #[serde(default)]
+    deletions: u32,
+    #[serde(default)]
+    patch: Option<String>,
+}
+
+impl From<GhFile> for PrFile {
+    fn from(f: GhFile) -> Self {
+        let status = match f.status.as_str() {
+            "added" => PrFileStatus::Added,
+            "removed" => PrFileStatus::Removed,
+            "renamed" => PrFileStatus::Renamed,
+            "copied" => PrFileStatus::Copied,
+            // "modified", "changed" (mode only), "unchanged".
+            _ => PrFileStatus::Modified,
+        };
+        PrFile {
+            path: f.filename,
+            old_path: f.previous_filename,
+            status,
+            additions: f.additions,
+            deletions: f.deletions,
+            patch: f.patch.filter(|p| !p.is_empty()),
+        }
+    }
+}
+
 fn labels(raw: Vec<GhLabel>) -> Vec<Label> {
     raw.into_iter()
         .map(|l| Label {
@@ -605,6 +698,7 @@ impl From<GhPull> for PullRequest {
             source_repo,
             target_branch: p.base.name,
             head_sha: p.head.sha,
+            base_sha: Some(p.base.sha).filter(|s| !s.is_empty()),
             labels: labels(p.labels),
             web_url: p.html_url,
             created_at: p.created_at,

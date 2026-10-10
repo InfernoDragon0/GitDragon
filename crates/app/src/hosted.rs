@@ -172,22 +172,12 @@ impl HostedRepo {
             .ok()
     }
 
-    /// The account for `repo`, and whether another one could stand in for it. Accounts
-    /// holding a token come first; one whose sign-in the host rejected is passed over until
-    /// the accounts change (a sign-in), unless no other is left.
+    /// The account for `repo`, and whether another one could stand in for it (see [`choose`]).
     fn pick<'a>(&self, accounts: &'a [Account], repo: &RepoId) -> Option<(&'a Account, bool)> {
         let all = accounts_for(accounts, repo);
         let generation = self.accounts.generation();
         let rejected = rejected().lock().unwrap_or_else(|p| p.into_inner());
-        let usable: Vec<&Account> = all
-            .iter()
-            .copied()
-            .filter(|a| rejected.get(&a.id) != Some(&generation))
-            .collect();
-        match usable.first() {
-            Some(first) => Some((first, usable.len() > 1)),
-            None => all.first().map(|first| (*first, false)),
-        }
+        choose(&all, |a| rejected.get(&a.id) == Some(&generation))
     }
 
     /// One host per account, shared by all repos: they share the token and so the quota.
@@ -267,6 +257,32 @@ fn remote_urls(remotes: &[Remote]) -> Vec<String> {
 }
 
 /// Blocked or nearly out: leave the rest of the quota to the panels.
+/// Picks from `all` (best first): accounts holding a token come first; one whose sign-in the
+/// host rejected is passed over until the accounts change (a sign-in), unless no other is left.
+/// A tokenless account (Credential Manager) only stands in when no account holds a token: going
+/// anonymous after a rejected sign-in would hide "sign in again" behind anonymous-API errors
+/// (no GraphQL, 60 requests an hour).
+fn choose<'a>(
+    all: &[&'a Account],
+    is_rejected: impl Fn(&Account) -> bool,
+) -> Option<(&'a Account, bool)> {
+    let with_token: Vec<&Account> = all
+        .iter()
+        .copied()
+        .filter(|a| a.auth.has_secret())
+        .collect();
+    let pool = if with_token.is_empty() {
+        all.to_vec()
+    } else {
+        with_token
+    };
+    let usable: Vec<&Account> = pool.iter().copied().filter(|a| !is_rejected(a)).collect();
+    match usable.first() {
+        Some(first) => Some((first, usable.len() > 1)),
+        None => pool.first().map(|first| (*first, false)),
+    }
+}
+
 fn quota_low(rate: &RateLimit, now: SystemTime) -> bool {
     rate.blocked(now).is_some() || rate.remaining.is_some_and(|n| n < KEEP_QUOTA)
 }
@@ -328,6 +344,47 @@ mod tests {
                 )
             ]
         );
+    }
+
+    #[test]
+    fn a_rejected_token_account_never_falls_back_to_a_tokenless_one() {
+        use accounts::{AuthMode, HostKind};
+        let account = |id: &str, auth| Account {
+            id: id.into(),
+            name: id.into(),
+            kind: HostKind::GitHub,
+            base_url: "https://github.com".into(),
+            auth,
+            username: None,
+        };
+        let oauth = account("oauth", AuthMode::OAuth);
+        let pat = account("pat", AuthMode::Pat);
+        let gcm = account("gcm", AuthMode::Gcm);
+        let id = |pick: Option<(&Account, bool)>| pick.map(|(a, more)| (a.id.clone(), more));
+        let none = |_: &Account| false;
+        let oauth_out = |a: &Account| a.id == "oauth";
+        // Token first; the GCM account is no stand-in for it.
+        assert_eq!(
+            id(choose(&[&gcm, &oauth], none)),
+            Some(("oauth".into(), false))
+        );
+        // Rejected: still the token account (its error says "sign in again"), not anonymous.
+        assert_eq!(
+            id(choose(&[&oauth, &gcm], oauth_out)),
+            Some(("oauth".into(), false))
+        );
+        // Another token account does stand in.
+        assert_eq!(
+            id(choose(&[&oauth, &pat, &gcm], none)),
+            Some(("oauth".into(), true))
+        );
+        assert_eq!(
+            id(choose(&[&oauth, &pat, &gcm], oauth_out)),
+            Some(("pat".into(), false))
+        );
+        // Only a GCM account: anonymous public reads are better than nothing.
+        assert_eq!(id(choose(&[&gcm], none)), Some(("gcm".into(), false)));
+        assert_eq!(id(choose(&[], none)), None);
     }
 
     #[test]

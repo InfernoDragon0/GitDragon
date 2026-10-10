@@ -23,6 +23,10 @@ use crate::remote::RepoId;
 #[path = "boards/gl.rs"]
 mod boards;
 
+/// Notes, approvals and diff discussions.
+#[path = "threads/gl.rs"]
+mod threads;
+
 pub struct GitLab {
     api: ApiClient,
     /// Web base, e.g. `https://gitlab.com` or `https://git.example.com:8443/gitlab`.
@@ -114,6 +118,7 @@ impl GitLab {
         Ok(Page {
             items: raw.into_iter().filter_map(map).collect(),
             next: fetched.next_page.then_some(page + 1),
+            last: fetched.last_page,
         })
     }
 }
@@ -177,6 +182,10 @@ impl GitHost for GitLab {
                 | Feature::CiStatus
                 | Feature::Avatars
                 | Feature::Boards
+                | Feature::Timeline
+                | Feature::Reviews
+                | Feature::ReviewComments
+                | Feature::PrFiles
         )
     }
 
@@ -387,6 +396,55 @@ impl GitHost for GitLab {
         Ok(self.api.decode::<GlIssue>(&answer)?.into())
     }
 
+    async fn timeline(
+        &self,
+        repo: &RepoId,
+        thread: Thread,
+        page: u32,
+    ) -> HostResult<Page<TimelineItem>> {
+        threads::timeline(self, repo, thread, page).await
+    }
+
+    async fn pr_reviews(&self, repo: &RepoId, number: u64, page: u32) -> HostResult<Page<Review>> {
+        threads::reviews(self, repo, number, page).await
+    }
+
+    async fn pr_review_comments(
+        &self,
+        repo: &RepoId,
+        number: u64,
+        page: u32,
+    ) -> HostResult<Page<ReviewComment>> {
+        threads::review_comments(self, repo, number, page).await
+    }
+
+    /// `merge_requests/:iid/diffs` (GitLab 15.7+), 100 a page; `diff` is empty for binary,
+    /// collapsed and too large files. Line counts come from the hunks.
+    async fn pr_files(&self, repo: &RepoId, number: u64) -> HostResult<PrFiles> {
+        let n = number.to_string();
+        let per_page = PR_FILES_PER_PAGE.to_string();
+        let mut out = PrFiles::default();
+        for page in 1..=PR_FILES_MAX_PAGES {
+            let p = page.to_string();
+            let url = self.project_url(
+                repo,
+                &["merge_requests", &n, "diffs"],
+                &[("page", &p), ("per_page", &per_page)],
+            );
+            let fetched = self.api.get(url).await?;
+            let raw: Vec<GlDiff> = self.api.decode(&fetched.body)?;
+            out.files.extend(raw.into_iter().map(PrFile::from));
+            if !fetched.next_page {
+                // A host may stop at its cap without saying so.
+                out.truncated =
+                    out.files.len() as u64 >= u64::from(PR_FILES_PER_PAGE * PR_FILES_MAX_PAGES);
+                return Ok(out);
+            }
+        }
+        out.truncated = true;
+        Ok(out)
+    }
+
     /// The latest pipeline for a branch / tag / sha, one check per job. Without the permission
     /// to list jobs the pipeline's own status is the single check.
     async fn ci_status(&self, repo: &RepoId, reference: &str) -> HostResult<CiStatus> {
@@ -530,6 +588,48 @@ struct GlProject {
 }
 
 /// Labels are plain names unless `with_labels_details` is asked for, so no colour.
+#[derive(Deserialize)]
+struct GlDiff {
+    old_path: String,
+    new_path: String,
+    #[serde(default)]
+    diff: String,
+    #[serde(default)]
+    new_file: bool,
+    #[serde(default)]
+    renamed_file: bool,
+    #[serde(default)]
+    deleted_file: bool,
+}
+
+impl From<GlDiff> for PrFile {
+    fn from(d: GlDiff) -> Self {
+        let status = if d.new_file {
+            PrFileStatus::Added
+        } else if d.deleted_file {
+            PrFileStatus::Removed
+        } else if d.renamed_file {
+            PrFileStatus::Renamed
+        } else {
+            PrFileStatus::Modified
+        };
+        let (additions, deletions) = patch_line_counts(&d.diff);
+        let deleted = status == PrFileStatus::Removed;
+        PrFile {
+            path: if deleted {
+                d.old_path.clone()
+            } else {
+                d.new_path
+            },
+            old_path: (status == PrFileStatus::Renamed).then_some(d.old_path),
+            status,
+            additions,
+            deletions,
+            patch: Some(d.diff).filter(|p| !p.trim().is_empty()),
+        }
+    }
+}
+
 fn labels(raw: Vec<String>) -> Vec<Label> {
     raw.into_iter()
         .map(|name| Label { name, color: None })
@@ -553,11 +653,20 @@ struct GlMergeRequest {
     target_branch: String,
     #[serde(default)]
     sha: Option<String>,
+    /// Only the single-MR endpoint has it (the list does not): None then.
+    #[serde(default)]
+    diff_refs: Option<GlDiffRefs>,
     #[serde(default)]
     labels: Vec<String>,
     web_url: String,
     created_at: String,
     updated_at: String,
+}
+
+#[derive(Deserialize)]
+struct GlDiffRefs {
+    #[serde(default)]
+    base_sha: Option<String>,
 }
 
 impl From<GlMergeRequest> for PullRequest {
@@ -580,6 +689,10 @@ impl From<GlMergeRequest> for PullRequest {
             source_repo: None,
             target_branch: m.target_branch,
             head_sha: m.sha.unwrap_or_default(),
+            base_sha: m
+                .diff_refs
+                .and_then(|d| d.base_sha)
+                .filter(|s| !s.is_empty()),
             labels: labels(m.labels),
             web_url: m.web_url,
             created_at: m.created_at,

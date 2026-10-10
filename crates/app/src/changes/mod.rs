@@ -144,7 +144,11 @@ pub fn lock_badge(
     let tip: SharedString = if ours {
         "Locked by you".into()
     } else {
-        format!("Locked by {owner}: you cannot push changes to it").into()
+        format!(
+            "Locked by {}: you cannot push changes to it",
+            ui::sanitize_line(&owner)
+        )
+        .into()
     };
     h_flex()
         .id(id)
@@ -156,6 +160,8 @@ pub fn lock_badge(
         .text_color(color)
         .bg(color.opacity(0.14))
         .child(Icon::new(IconName::Lock).xsmall())
-        .when(!ours, |d| d.child(owner))
+        .when(!ours, |d| {
+            d.child(SharedString::from(ui::sanitize_line(&owner).into_owned()))
+        })
         .tooltip(move |window, cx| Tooltip::new(tip.clone()).build(window, cx))
 }

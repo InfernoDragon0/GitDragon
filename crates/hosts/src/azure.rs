@@ -50,6 +50,10 @@ const NEW_ITEM_TYPE: &str = "$Issue";
 #[path = "boards/az.rs"]
 mod boards;
 
+/// Pull request threads and votes, work item comments.
+#[path = "threads/az.rs"]
+mod threads;
+
 pub struct AzureDevOps {
     api: ApiClient,
     /// Organisation URL, e.g. `https://dev.azure.com/org`; also the API base.
@@ -186,6 +190,10 @@ impl AzureDevOps {
                 .last_merge_source_commit
                 .map(|c| c.commit_id)
                 .unwrap_or_default(),
+            base_sha: p
+                .last_merge_target_commit
+                .map(|c| c.commit_id)
+                .filter(|s| !s.is_empty()),
             labels: (p.labels.into_iter())
                 .filter(|l| l.active.unwrap_or(true))
                 .map(|l| Label {
@@ -300,7 +308,19 @@ impl GitHost for AzureDevOps {
                 | Feature::CloseIssue
                 | Feature::CiStatus
                 | Feature::Boards
+                | Feature::Timeline
+                | Feature::Reviews
+                | Feature::ReviewComments
         )
+    }
+
+    /// Azure Repos keeps no head refs for pull requests, only the merge preview
+    /// `pull/<n>/merge` (the head merged into the target, rebuilt as either moves).
+    fn pull_changes_ref(&self, number: u64) -> Option<PullRef> {
+        Some(PullRef {
+            reference: format!("pull/{number}/merge"),
+            merge_preview: true,
+        })
     }
 
     fn web_url(&self, repo: &RepoId, target: &WebTarget) -> Option<String> {
@@ -373,10 +393,7 @@ impl GitHost for AzureDevOps {
     /// Everything the account sees in the organisation; the API does not page.
     async fn repos(&self, page: u32) -> HostResult<Page<RepoSummary>> {
         if page > 1 {
-            return Ok(Page {
-                items: Vec::new(),
-                next: None,
-            });
+            return Ok(Page::new(Vec::new(), None));
         }
         let url = self.url(&["_apis", "git", "repositories"], &[]);
         let fetched = self.api.get(url).await?;
@@ -401,7 +418,7 @@ impl GitHost for AzureDevOps {
                 })
             })
             .collect();
-        Ok(Page { items, next: None })
+        Ok(Page::new(items, None))
     }
 
     /// Closed asks Azure for every status and drops the active ones here, so a page can come
@@ -435,10 +452,7 @@ impl GitHost for AzureDevOps {
             .map(|p| self.pull(project, &repo.repo, p))
             .filter(|p| query.state != StateFilter::Closed || p.state != PrState::Open)
             .collect();
-        Ok(Page {
-            items,
-            next: full.then_some(query.page.max(1) + 1),
-        })
+        Ok(Page::new(items, full.then_some(query.page.max(1) + 1)))
     }
 
     async fn pull_request(&self, repo: &RepoId, number: u64) -> HostResult<PullRequest> {
@@ -503,10 +517,7 @@ impl GitHost for AzureDevOps {
             .collect();
         let next = more.then_some(page + 1);
         if ids.is_empty() {
-            return Ok(Page {
-                items: Vec::new(),
-                next,
-            });
+            return Ok(Page::new(Vec::new(), next));
         }
         let joined = (ids.iter())
             .map(u64::to_string)
@@ -524,7 +535,7 @@ impl GitHost for AzureDevOps {
         let items = (list.value.into_iter())
             .map(|w| self.issue(project, w))
             .collect();
-        Ok(Page { items, next })
+        Ok(Page::new(items, next))
     }
 
     /// A work item of type `Issue` (see `NEW_ITEM_TYPE`); labels become tags. The description
@@ -611,6 +622,28 @@ impl GitHost for AzureDevOps {
         Err(last.unwrap_or(HostError::Unsupported(Feature::CloseIssue)))
     }
 
+    async fn timeline(
+        &self,
+        repo: &RepoId,
+        thread: Thread,
+        page: u32,
+    ) -> HostResult<Page<TimelineItem>> {
+        threads::timeline(self, repo, thread, page).await
+    }
+
+    async fn pr_reviews(&self, repo: &RepoId, number: u64, page: u32) -> HostResult<Page<Review>> {
+        threads::reviews(self, repo, number, page).await
+    }
+
+    async fn pr_review_comments(
+        &self,
+        repo: &RepoId,
+        number: u64,
+        page: u32,
+    ) -> HostResult<Page<ReviewComment>> {
+        threads::review_comments(self, repo, number, page).await
+    }
+
     /// The latest build of every pipeline for a branch (or, for a 40-hex commit, among the
     /// recent builds of the repo). Builds are filtered by repository id, which one extra
     /// (cached) GET resolves from the name.
@@ -689,7 +722,7 @@ struct AzList<T> {
     value: Vec<T>,
 }
 
-#[derive(Deserialize)]
+#[derive(Clone, Deserialize)]
 #[serde(rename_all = "camelCase")]
 struct AzPerson {
     #[serde(default)]
@@ -813,6 +846,8 @@ struct AzPull {
     target_ref_name: String,
     #[serde(default)]
     last_merge_source_commit: Option<AzCommit>,
+    #[serde(default)]
+    last_merge_target_commit: Option<AzCommit>,
     #[serde(default)]
     labels: Vec<AzLabel>,
     #[serde(default)]

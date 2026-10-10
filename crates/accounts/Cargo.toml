@@ -26,6 +26,9 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # Askpass helper <-> app: named pipe (Windows) / Unix socket.
 interprocess = "2"
 
+[target.'cfg(windows)'.dependencies]
+widestring = "1"
+
 [dev-dependencies]
 tempfile = "3"
 async-io = "2.6"

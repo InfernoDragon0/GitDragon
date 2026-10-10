@@ -118,7 +118,14 @@ impl Render for NewIssueForm {
             .child(Textarea::new(&self.body).disabled(busy))
             .child(Input::new(&self.labels).disabled(busy))
             .when_some(self.error.clone(), |d, error| {
-                d.child(div().text_sm().text_color(palette.error).child(error))
+                d.child(
+                    div()
+                        .text_sm()
+                        .text_color(palette.error)
+                        .child(SharedString::from(
+                            ui::sanitize_display(&error).into_owned(),
+                        )),
+                )
             })
             .child(
                 h_flex()

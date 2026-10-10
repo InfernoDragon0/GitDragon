@@ -30,6 +30,7 @@ fn on_window(cx: &mut App, f: impl FnOnce(&mut Window, &mut App) + 'static) {
 /// The text a toast shows for `message`: redacted, at most a few lines.
 pub fn clean(message: &str) -> String {
     let redacted = git_core::redact::redact(message);
+    let redacted = ui::sanitize_display(&redacted);
     let mut out = String::new();
     for (i, line) in redacted
         .lines()

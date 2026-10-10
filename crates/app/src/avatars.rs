@@ -34,6 +34,8 @@ pub struct Avatars {
     /// Lowercased email -> the repo's host and a commit by that email, for emails the free
     /// sources cannot place.
     hints: HashMap<String, (HostedRepo, String)>,
+    /// `url:` keys (see [`url_key`]) -> the https URL they stand for.
+    urls: HashMap<String, String>,
     /// Emails to leave alone until then (host busy, commit not pushed, no account).
     later: HashMap<String, Instant>,
     task: Option<Task<()>>,
@@ -65,6 +67,7 @@ pub fn init(gravatar: bool, cx: &mut App) {
         queued: Vec::new(),
         queued_set: HashSet::new(),
         hints: HashMap::new(),
+        urls: HashMap::new(),
         later: HashMap::new(),
         task: None,
     });
@@ -127,6 +130,18 @@ impl Avatars {
         self.request(authors.into_iter().map(|(email, _)| email), cx);
     }
 
+    /// Queues a picture the host named by URL (https only, like every fetch here); the image
+    /// is then found with [`image`] under the returned key, which never collides with an email.
+    /// Same disk cache, size cap and batching as emails.
+    pub fn request_url(&mut self, url: &str, cx: &mut Context<Self>) -> Option<String> {
+        let key = url_key(url)?;
+        self.urls
+            .entry(key.clone())
+            .or_insert_with(|| url.trim().to_owned());
+        self.request([key.as_str()], cx);
+        Some(key)
+    }
+
     /// Queues the emails not known yet; images arrive in the background (observers are
     /// notified).
     pub fn request<'a>(
@@ -158,7 +173,11 @@ impl Avatars {
         let jobs: Vec<Job> = batch
             .into_iter()
             .map(|email| {
-                let url = avatar_url(&email, self.gravatar);
+                let url = self
+                    .urls
+                    .get(&email)
+                    .cloned()
+                    .or_else(|| avatar_url(&email, self.gravatar));
                 // GitHub's own noreply addresses are fully answered by the free source.
                 let hint = self.hints.remove(&email).filter(|_| !is_noreply(&email));
                 (email, url, hint)
@@ -222,6 +241,16 @@ impl Avatars {
 
 /// A queued email with its free URL and the host to ask when that has nothing.
 type Job = (String, Option<String>, Option<(HostedRepo, String)>);
+
+/// The key of a picture at `url` for [`image`] and [`Avatars::request_url`]: `url:` and the
+/// hash of the URL. `None` unless it is a plain https URL of sane length.
+pub fn url_key(url: &str) -> Option<String> {
+    let url = url.trim();
+    (url.starts_with("https://")
+        && url.len() <= 2048
+        && !url.bytes().any(|b| b.is_ascii_control() || b == b' '))
+    .then(|| format!("url:{}", hex_sha256(url)))
+}
 
 fn is_noreply(email: &str) -> bool {
     email.ends_with("@users.noreply.github.com")
@@ -297,11 +326,11 @@ async fn hosted_url(
     let found = repo.avatar(commit, email).await;
     if let Some(file) = &file
         && let Some(dir) = file.parent()
-        && std::fs::create_dir_all(dir).is_ok()
+        && crate::state::create_private_dir(dir).is_ok()
     {
         _ = match &found {
-            Lookup::Url(url) => std::fs::write(file, url),
-            Lookup::Miss => std::fs::write(file, b""),
+            Lookup::Url(url) => crate::state::write_private(file, url),
+            Lookup::Miss => crate::state::write_private(file, b""),
             Lookup::Later(_) => Ok(()),
         };
     }
@@ -329,11 +358,11 @@ async fn load(dir: Option<&std::path::Path>, url: &str) -> Option<Vec<u8>> {
         return None;
     };
     if let Some(dir) = dir
-        && std::fs::create_dir_all(dir).is_ok()
+        && crate::state::create_private_dir(dir).is_ok()
     {
         _ = match &fetched {
-            Some(bytes) => std::fs::write(dir.join(format!("{key}.img")), bytes),
-            None => std::fs::write(dir.join(format!("{key}.none")), b""),
+            Some(bytes) => crate::state::write_private(&dir.join(format!("{key}.img")), bytes),
+            None => crate::state::write_private(&dir.join(format!("{key}.none")), b""),
         };
     }
     fetched
@@ -388,6 +417,18 @@ mod tests {
             gravatar.len(),
             "https://gravatar.com/avatar/".len() + 64 + 11
         );
+    }
+
+    #[test]
+    fn url_keys() {
+        let key = url_key("https://example.com/a.png?s=64").unwrap();
+        assert!(key.starts_with("url:") && !key.contains('@'));
+        assert_eq!(url_key(" https://example.com/a.png?s=64 "), Some(key));
+        assert_eq!(url_key("http://example.com/a.png"), None);
+        assert_eq!(url_key("https://exa mple.com/a.png"), None);
+        assert_eq!(url_key("file:///etc/passwd"), None);
+        assert_eq!(url_key(&format!("https://x.io/{}", "a".repeat(3000))), None);
+        assert_ne!(url_key("https://x.io/a"), url_key("https://x.io/b"));
     }
 
     #[test]

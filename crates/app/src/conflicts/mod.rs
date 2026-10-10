@@ -11,6 +11,7 @@ use git_core::GitRepo as _;
 use git_core::conflicts::{Choice, ConflictFile, ConflictKind, ConflictText, Side, Stages};
 use gpui_kit::component::button::{Button, ButtonVariant, ButtonVariants as _};
 use gpui_kit::component::input::{Editor as EditorInput, EditorState, InputEvent};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, Context, ElementId, Entity, FocusHandle,
@@ -482,7 +483,7 @@ pub fn banner(
                     .text_sm()
                     .text_color(palette.emph)
                     .truncate()
-                    .child(SharedString::from(title)),
+                    .child(SharedString::from(ui::sanitize_line(&title).into_owned())),
             )
             .child(
                 div()
@@ -492,7 +493,7 @@ pub fn banner(
                     } else {
                         palette.ok
                     })
-                    .child(SharedString::from(detail)),
+                    .child(SharedString::from(ui::sanitize_line(&detail).into_owned())),
             )
             .child(div().flex_1())
             .when(conflicts > 0, |d| {
@@ -522,69 +523,66 @@ pub fn banner(
 impl ConflictsView {
     fn render_list(&self, palette: &Palette, cx: &mut Context<Self>) -> impl IntoElement {
         let tab = self.tab.read(cx);
-        let rows = tab.conflicts.iter().enumerate().map(|(ix, file)| {
-            let selected = self.selected.as_ref().is_some_and(|s| s.path == file.path);
-            let name = file.path.to_str_lossy().into_owned();
-            let (dir, base) = match name.rsplit_once('/') {
-                Some((dir, base)) => (Some(dir.to_string()), base.to_string()),
-                None => (None, name.clone()),
-            };
-            let file = file.clone();
-            h_flex()
-                .id(ElementId::NamedInteger("conflict-row".into(), ix as u64))
-                .h(zoomed(28., cx))
-                .px_2()
-                .gap_2()
-                .cursor_pointer()
-                .when(selected, |d| {
-                    d.bg(palette.accent_soft).text_color(palette.emph)
-                })
-                .when(!selected, |d| d.hover(|s| s.bg(palette.hover)))
-                .child(
-                    div()
-                        .w(px(6.))
-                        .h(px(6.))
-                        .rounded_full()
-                        .bg(palette.warn)
-                        .flex_none(),
-                )
-                .child(
-                    div()
-                        .flex_1()
-                        .min_w_0()
-                        .truncate()
-                        .text_sm()
-                        .child(SharedString::from(base))
-                        .when_some(dir, |d, dir| {
-                            d.child(
-                                div()
-                                    .text_xs()
-                                    .text_color(palette.muted)
-                                    .truncate()
-                                    .child(SharedString::from(dir)),
-                            )
-                        }),
-                )
-                .child(
-                    div()
-                        .flex_none()
-                        .text_xs()
-                        .text_color(palette.muted)
-                        .child(file.kind.label()),
-                )
-                .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
-                    this.select(file.clone(), window, cx);
-                    if event.click_count() >= 2 {
-                        this.edit_file(window, cx);
-                    }
-                }))
-        });
+        let rows =
+            tab.conflicts.iter().enumerate().map(|(ix, file)| {
+                let selected = self.selected.as_ref().is_some_and(|s| s.path == file.path);
+                let name = file.path.to_str_lossy().into_owned();
+                let (dir, base) = match name.rsplit_once('/') {
+                    Some((dir, base)) => (Some(dir.to_string()), base.to_string()),
+                    None => (None, name.clone()),
+                };
+                let file = file.clone();
+                h_flex()
+                    .id(ElementId::NamedInteger("conflict-row".into(), ix as u64))
+                    .h(zoomed(28., cx))
+                    .px_2()
+                    .gap_2()
+                    .cursor_pointer()
+                    .when(selected, |d| {
+                        d.bg(palette.accent_soft).text_color(palette.emph)
+                    })
+                    .when(!selected, |d| d.hover(|s| s.bg(palette.hover)))
+                    .child(
+                        div()
+                            .w(px(6.))
+                            .h(px(6.))
+                            .rounded_full()
+                            .bg(palette.warn)
+                            .flex_none(),
+                    )
+                    .child(
+                        div()
+                            .flex_1()
+                            .min_w_0()
+                            .truncate()
+                            .text_sm()
+                            .child(SharedString::from(ui::sanitize_line(&base).into_owned()))
+                            .when_some(dir, |d, dir| {
+                                d.child(div().text_xs().text_color(palette.muted).truncate().child(
+                                    SharedString::from(ui::sanitize_line(&dir).into_owned()),
+                                ))
+                            }),
+                    )
+                    .child(
+                        div()
+                            .flex_none()
+                            .text_xs()
+                            .text_color(palette.muted)
+                            .child(file.kind.label()),
+                    )
+                    .on_click(cx.listener(move |this, event: &ClickEvent, window, cx| {
+                        this.select(file.clone(), window, cx);
+                        if event.click_count() >= 2 {
+                            this.edit_file(window, cx);
+                        }
+                    }))
+            });
         v_flex()
             .id("conflict-list")
             .w(px(LIST_WIDTH))
             .h_full()
             .flex_none()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .border_r_1()
             .border_color(palette.border)
             .bg(palette.panel)
@@ -633,7 +631,7 @@ impl ConflictsView {
                         .text_color(palette.muted)
                         .bg(tint.opacity(0.12))
                         .truncate()
-                        .child(SharedString::from(title)),
+                        .child(SharedString::from(ui::sanitize_line(&title).into_owned())),
                 )
                 .child(
                     div()
@@ -645,7 +643,9 @@ impl ConflictsView {
                         .whitespace_nowrap()
                         .overflow_x_hidden()
                         .children(text.lines().map(|l| {
-                            div().child(SharedString::from(l.to_str_lossy().into_owned()))
+                            div().child(SharedString::from(
+                                ui::sanitize_line(&l.to_str_lossy()).into_owned(),
+                            ))
                         }))
                         .when(text.is_empty(), |d| {
                             d.text_color(palette.muted).child("(nothing)")
@@ -804,7 +804,7 @@ impl ConflictsView {
                 .justify_center()
                 .text_sm()
                 .text_color(palette.muted)
-                .child(text)
+                .child(SharedString::from(ui::sanitize_display(&text).into_owned()))
                 .into_any_element()
         };
         if let Some(editor) = self.file_editors.shown(cx) {
@@ -872,7 +872,7 @@ impl ConflictsView {
                                 div()
                                     .text_xs()
                                     .text_color(palette.muted)
-                                    .child(SharedString::from(status)),
+                                    .child(SharedString::from(ui::sanitize_line(&status).into_owned())),
                             )
                             .child(div().flex_1())
                             .child(
@@ -925,7 +925,7 @@ impl ConflictsView {
                             .id("conflict-blocks")
                             .flex_1()
                             .min_h_0()
-                            .overflow_y_scroll()
+                            .overflow_y_scrollbar()
                             .children(blocks),
                     )
                     .child(
@@ -987,10 +987,27 @@ impl Render for ConflictsView {
             .error
             .clone()
             .or_else(|| self.tab.read(cx).op_error.clone());
+        let subtitle = {
+            let tab = self.tab.read(cx);
+            match (&tab.in_progress, tab.conflicts.len()) {
+                (None, _) => "No merge, rebase or cherry-pick in progress.".to_string(),
+                (Some(state), 0) => format!(
+                    "No conflicts left: continue the {}.",
+                    state.op.label().to_lowercase()
+                ),
+                (Some(state), n) => format!(
+                    "{n} conflicted {}: resolve {}, then continue the {}.",
+                    if n == 1 { "file" } else { "files" },
+                    if n == 1 { "it" } else { "them" },
+                    state.op.label().to_lowercase()
+                ),
+            }
+        };
         v_flex()
             .size_full()
             .track_focus(&self.focus)
             .bg(palette.bg)
+            .child(crate::page_header::page_header("Conflicts", subtitle, None, cx))
             .when_some(error, |d, error| {
                 d.child(
                     div()

@@ -19,6 +19,7 @@ use gpui_kit::component::button::{Button, ButtonVariants as _};
 use gpui_kit::component::dock::{BasePanel, Panel, PanelEvent};
 use gpui_kit::component::input::{Input, InputEvent, InputState};
 use gpui_kit::component::menu::{DropdownMenu as _, PopupMenuItem};
+use gpui_kit::component::scroll::ScrollableElement as _;
 use gpui_kit::component::{ActiveTheme as _, Disableable as _, Sizable as _, h_flex, v_flex};
 use gpui_kit::{
     AnyElement, App, AppContext as _, ClickEvent, ClipboardItem, Context, ElementId, Entity,
@@ -782,12 +783,14 @@ impl DetailsPanel {
             |files: &[&FileEntry]| files.iter().map(|f| f.path.clone()).collect::<Vec<_>>();
         let strings = |paths: &[&String]| paths.iter().map(|p| (*p).clone()).collect::<Vec<_>>();
 
+        let display = ui::fonts(cx).display;
         let heading = |text: String| {
             div()
                 .flex_1()
                 .pt_1()
                 .pb_0p5()
                 .text_xs()
+                .font_family(display.clone())
                 .font_weight(gpui_kit::FontWeight::SEMIBOLD)
                 .text_color(palette.muted)
                 .child(text)
@@ -819,13 +822,7 @@ impl DetailsPanel {
             h_flex()
                 .gap_1()
                 .pb_1()
-                .child(
-                    div()
-                        .flex_1()
-                        .text_color(palette.emph)
-                        .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                        .child("Uncommitted changes"),
-                )
+                .child(ui::typography::item_title("Uncommitted changes", cx).flex_1())
                 .child(
                     Button::new("wip-explain")
                         .ghost()
@@ -1139,7 +1136,7 @@ impl DetailsPanel {
                             div()
                                 .truncate()
                                 .text_color(palette.fg)
-                                .child(SharedString::from(name)),
+                                .child(SharedString::from(ui::sanitize_line(&name).into_owned())),
                         )
                         .child(div().text_xs().text_color(palette.muted).child(
                             SharedString::from(format::full_time(sig.time, sig.tz_offset_minutes)),
@@ -1205,18 +1202,18 @@ impl DetailsPanel {
                         .child(more),
                 )
             })
-            .child(
-                div()
-                    .text_color(palette.emph)
-                    .font_weight(gpui_kit::FontWeight::SEMIBOLD)
-                    .child(SharedString::from(c.subject.to_str_lossy().into_owned())),
-            )
+            .child(ui::typography::item_title(
+                ui::sanitize_line(&c.subject.to_str_lossy()).into_owned(),
+                cx,
+            ))
             .when(!c.body.trim().is_empty(), |d| {
                 d.child(
                     div()
                         .text_xs()
                         .text_color(palette.fg)
-                        .child(SharedString::from(c.body.to_str_lossy().trim().to_string())),
+                        .child(SharedString::from(
+                            ui::sanitize_display(c.body.to_str_lossy().trim()).into_owned(),
+                        )),
                 )
             })
             .child(
@@ -1428,7 +1425,7 @@ fn name_row(
                     div()
                         .flex_none()
                         .text_color(palette.emph)
-                        .child(SharedString::from(name)),
+                        .child(SharedString::from(ui::sanitize_line(&name).into_owned())),
                 )
                 .child(
                     div()
@@ -1436,7 +1433,7 @@ fn name_row(
                         .pl_1()
                         .truncate()
                         .text_color(palette.muted)
-                        .child(SharedString::from(dir)),
+                        .child(SharedString::from(ui::sanitize_line(&dir).into_owned())),
                 ),
         )
 }
@@ -1533,7 +1530,7 @@ impl Render for DetailsPanel {
         div()
             .id("details-scroll")
             .size_full()
-            .overflow_y_scroll()
+            .overflow_y_scrollbar()
             .track_focus(&self.focus)
             .bg(palette.panel)
             .child(body)

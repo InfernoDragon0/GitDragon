@@ -387,3 +387,47 @@ fn commit_graph_is_written_then_kept_up_to_date() {
         CommitGraph::Disabled
     );
 }
+
+/// Makes `link` point at the directory `target`: a symlink, or a junction on Windows when
+/// symlinks need privileges.
+fn link_dir(target: &Path, link: &Path) -> bool {
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_dir(target, link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(link)
+                .arg(target)
+                .output()
+                .is_ok_and(|o| o.status.success())
+    }
+}
+
+#[test]
+fn worktree_file_refuses_paths_through_links() {
+    use git_core::ops::{LINKED_PATH, worktree_file};
+    let dir = tempfile::tempdir().unwrap();
+    let (root, outside) = (dir.path().join("repo"), dir.path().join("outside"));
+    std::fs::create_dir_all(root.join("src")).unwrap();
+    std::fs::create_dir(&outside).unwrap();
+    assert_eq!(
+        worktree_file(&root, b"src/a.rs").unwrap(),
+        root.join("src").join("a.rs")
+    );
+    assert!(worktree_file(&root, b"new/dir/file").is_ok());
+    assert!(worktree_file(&root, b"../x").is_err());
+    if !link_dir(&outside, &root.join("link")) {
+        eprintln!("could not create a link: skipped");
+        return;
+    }
+    for path in [&b"link"[..], b"link/secret", b"link/new/file"] {
+        match worktree_file(&root, path) {
+            Err(git_core::GitError::InvalidArgument { what, .. }) => assert_eq!(what, LINKED_PATH),
+            other => panic!("{path:?}: {other:?}"),
+        }
+    }
+}

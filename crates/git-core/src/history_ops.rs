@@ -140,6 +140,17 @@ impl CliRepo {
     /// is shown first and the counts follow.
     pub async fn commit_files(&self, id: &str, counts: bool) -> Result<Vec<ChangedFile>> {
         let base = self.first_parent_or_empty(id).await?;
+        self.range_files(&base, id, counts).await
+    }
+
+    /// The files changed from `from` to `to` (two-dot, both commits or trees), without
+    /// patches; `counts` as in [`Self::commit_files`].
+    pub async fn range_files(
+        &self,
+        from: &str,
+        to: &str,
+        counts: bool,
+    ) -> Result<Vec<ChangedFile>> {
         let mut cmd = GitCommand::read(self.root()).arg("diff");
         if counts {
             cmd = cmd.arg("--numstat");
@@ -154,8 +165,8 @@ impl CliRepo {
                 "--find-renames",
                 "--end-of-options",
             ])
-            .rev(&base)?
-            .rev(id)?
+            .rev(from)?
+            .rev(to)?
             .paths::<_, &[u8]>([]);
         Ok(parse_raw_numstat(&self.runner().run(cmd).await?))
     }
@@ -167,6 +178,16 @@ impl CliRepo {
         file: &ChangedFile,
     ) -> Result<Option<crate::parse::diff::FileDiff>> {
         let base = self.first_parent_or_empty(id).await?;
+        self.range_file_diff(&base, id, file).await
+    }
+
+    /// One file's diff from `from` to `to` (both paths of a rename, so it stays a rename).
+    pub async fn range_file_diff(
+        &self,
+        from: &str,
+        to: &str,
+        file: &ChangedFile,
+    ) -> Result<Option<crate::parse::diff::FileDiff>> {
         let mut paths: Vec<&[u8]> = Vec::new();
         for p in [&file.old_path, &file.new_path].into_iter().flatten() {
             if !paths.contains(&p.as_slice()) {
@@ -177,8 +198,8 @@ impl CliRepo {
             .arg("diff")
             .args(crate::parse::diff::args(true))
             .arg("--end-of-options")
-            .rev(&base)?
-            .rev(id)?
+            .rev(from)?
+            .rev(to)?
             .paths(paths);
         let out = self.runner().run(cmd).await?;
         Ok(crate::parse::diff::parse(&out)?.into_iter().next())

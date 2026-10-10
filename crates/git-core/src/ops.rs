@@ -2,7 +2,7 @@
 //! patches), commit, push and stashes. All run as [`Mode::Write`](crate::Mode) commands, so the
 //! user's hooks and config apply as in a terminal.
 
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 use bstr::{BString, ByteSlice};
 
@@ -97,6 +97,33 @@ pub fn validate_repo_path(path: &[u8]) -> Result<()> {
         });
     }
     Ok(())
+}
+
+/// What [`worktree_file`] reports for a path that runs through a link.
+pub const LINKED_PATH: &str = "linked path";
+
+/// The worktree file for repo-relative `path` under `root`, for reading or writing it directly.
+/// Refuses invalid paths and any path whose existing parts include a symbolic link or junction;
+/// the trailing parts may not exist yet.
+pub fn worktree_file(root: &Path, path: &[u8]) -> Result<PathBuf> {
+    validate_repo_path(path)?;
+    let rel = path.to_path_lossy();
+    let mut walked = root.to_path_buf();
+    for part in rel.components() {
+        walked.push(part);
+        match std::fs::symlink_metadata(&walked) {
+            Ok(meta) if meta.file_type().is_symlink() => {
+                return Err(GitError::InvalidArgument {
+                    what: LINKED_PATH,
+                    value: rel.display().to_string(),
+                });
+            }
+            Ok(_) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => break,
+            Err(e) => return Err(e.into()),
+        }
+    }
+    Ok(root.join(rel))
 }
 
 fn checked(paths: &[BString]) -> Result<&[BString]> {

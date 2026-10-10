@@ -10,6 +10,7 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 APPDIR="$(mktemp -d)/GitDragon.AppDir"
 
 install -Dm755 "$BIN" "$APPDIR/usr/bin/gitdragon"
+install -Dm755 "$(dirname "$BIN")/gitdragon-mcp" "$APPDIR/usr/bin/gitdragon-mcp"
 install -Dm644 "$HERE/gitdragon.desktop" "$APPDIR/usr/share/applications/gitdragon.desktop"
 cp "$HERE/gitdragon.desktop" "$APPDIR/gitdragon.desktop"
 # TODO(icon): AppImage requires packaging/linux/gitdragon.png (256x256); generate it from the logo SVG.
